@@ -11,7 +11,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/example/funcscan"
+	"github.com/notrobot1/funcscan/"
 )
 
 func main() {
