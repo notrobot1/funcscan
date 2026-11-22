@@ -238,31 +238,43 @@ func extract(ctx context.Context, parser *sitter.Parser, lang *Language, src []b
 
 	var funcs []Function
 	seen := map[uint32]bool{} // один и тот же узел могут поймать несколько шаблонов
-	for {
-		match, ok := cursor.NextMatch()
-		if !ok {
-			break
-		}
-		for _, capture := range match.Captures {
-			node := capture.Node
-			if query.CaptureNameForId(capture.Index) == captureDecl {
-				node = innermostDeclarator(node)
-			}
-			if node == nil || seen[node.StartByte()] {
-				continue
-			}
-			name := strings.TrimSpace(node.Content(src))
-			if name == "" {
-				continue
-			}
-			seen[node.StartByte()] = true
-			funcs = append(funcs, Function{
-				Name:     name,
-				Line:     int(node.StartPoint().Row) + 1,
-				Language: lang.Name,
-			})
+	
+for {
+	match, ok := cursor.NextMatch()
+	if !ok {
+		break
+	}
+	var nameNode, funcNode *sitter.Node
+	for _, capture := range match.Captures {
+		switch query.CaptureNameForId(capture.Index) {
+		case captureFunc:
+			funcNode = capture.Node
+		case captureDecl:
+			nameNode = innermostDeclarator(capture.Node)
+		default:
+			nameNode = capture.Node
 		}
 	}
+	if nameNode == nil || seen[nameNode.StartByte()] {
+		continue
+	}
+	name := strings.TrimSpace(nameNode.Content(src))
+	if name == "" {
+		continue
+	}
+	if funcNode == nil {
+		funcNode = nameNode
+	}
+	seen[nameNode.StartByte()] = true
+	funcs = append(funcs, Function{
+		Name:      name,
+		Line:      int(funcNode.StartPoint().Row) + 1,
+		EndLine:   int(funcNode.EndPoint().Row) + 1,
+		StartByte: funcNode.StartByte(),
+		EndByte:   funcNode.EndByte(),
+		Language:  lang.Name,
+	})
+}
 	sort.SliceStable(funcs, func(i, j int) bool { return funcs[i].Line < funcs[j].Line })
 	return funcs, nil
 }
