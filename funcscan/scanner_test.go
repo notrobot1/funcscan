@@ -32,7 +32,6 @@ func TestLanguages(t *testing.T) {
 		{"a.rb", "def foo; end\nclass A\n  def bar; end\n  def self.baz; end\nend\n", []string{"foo", "bar", "baz"}},
 		{"a.rs", "fn foo() {}\nstruct S;\nimpl S { pub fn bar(&self) {} }\ntrait T { fn sig(&self); }\n", []string{"foo", "bar"}},
 		{"a.scala", "object A {\n  def foo(x: Int): Int = x\n  def bar() = {}\n}\n", []string{"foo", "bar"}},
-		{"a.swift", "func foo() {}\nclass A {\n  init() {}\n  func bar(x: Int) -> Int { return x }\n}\n", []string{"foo", "init", "bar"}},
 		{"a.sh", "foo() { echo 1; }\nfunction bar { echo 2; }\n", []string{"foo", "bar"}},
 	}
 

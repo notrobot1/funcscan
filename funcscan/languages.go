@@ -6,25 +6,24 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"unsafe"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/bash"
-	"github.com/smacker/go-tree-sitter/c"
-	"github.com/smacker/go-tree-sitter/cpp"
-	"github.com/smacker/go-tree-sitter/csharp"
-	"github.com/smacker/go-tree-sitter/golang"
-	"github.com/smacker/go-tree-sitter/java"
-	"github.com/smacker/go-tree-sitter/javascript"
-	"github.com/smacker/go-tree-sitter/kotlin"
-	"github.com/smacker/go-tree-sitter/lua"
-	"github.com/smacker/go-tree-sitter/php"
-	"github.com/smacker/go-tree-sitter/python"
-	"github.com/smacker/go-tree-sitter/ruby"
-	"github.com/smacker/go-tree-sitter/rust"
-	"github.com/smacker/go-tree-sitter/scala"
-	"github.com/smacker/go-tree-sitter/swift"
-	"github.com/smacker/go-tree-sitter/typescript/tsx"
-	"github.com/smacker/go-tree-sitter/typescript/typescript"
+	tree_sitter_kotlin "github.com/tree-sitter-grammars/tree-sitter-kotlin/bindings/go"
+	tree_sitter_lua "github.com/tree-sitter-grammars/tree-sitter-lua/bindings/go"
+	sitter "github.com/tree-sitter/go-tree-sitter"
+	tree_sitter_bash "github.com/tree-sitter/tree-sitter-bash/bindings/go"
+	tree_sitter_c_sharp "github.com/tree-sitter/tree-sitter-c-sharp/bindings/go"
+	tree_sitter_c "github.com/tree-sitter/tree-sitter-c/bindings/go"
+	tree_sitter_cpp "github.com/tree-sitter/tree-sitter-cpp/bindings/go"
+	tree_sitter_go "github.com/tree-sitter/tree-sitter-go/bindings/go"
+	tree_sitter_java "github.com/tree-sitter/tree-sitter-java/bindings/go"
+	tree_sitter_javascript "github.com/tree-sitter/tree-sitter-javascript/bindings/go"
+	tree_sitter_php "github.com/tree-sitter/tree-sitter-php/bindings/go"
+	tree_sitter_python "github.com/tree-sitter/tree-sitter-python/bindings/go"
+	tree_sitter_ruby "github.com/tree-sitter/tree-sitter-ruby/bindings/go"
+	tree_sitter_rust "github.com/tree-sitter/tree-sitter-rust/bindings/go"
+	tree_sitter_scala "github.com/tree-sitter/tree-sitter-scala/bindings/go"
+	tree_sitter_typescript "github.com/tree-sitter/tree-sitter-typescript/bindings/go"
 )
 
 // Имена захватов (captures), которые понимает сканер.
@@ -46,23 +45,27 @@ type Language struct {
 	// Name — имя языка, попадает в JSON (поле "language").
 	Name string
 
-	grammar *sitter.Language
+	grammar unsafe.Pointer // указатель на грамматику из bindings/go
 	pattern string
 
 	once  sync.Once
+	lang  *sitter.Language
 	query *sitter.Query
 	err   error
 }
 
-// compiled компилирует запрос один раз и переиспользует его.
-func (l *Language) compiled() (*sitter.Query, error) {
+// compiled создаёт язык и компилирует запрос один раз и переиспользует их.
+func (l *Language) compiled() (*sitter.Language, *sitter.Query, error) {
 	l.once.Do(func() {
-		l.query, l.err = sitter.NewQuery([]byte(l.pattern), l.grammar)
-		if l.err != nil {
-			l.err = fmt.Errorf("funcscan: запрос для языка %s: %w", l.Name, l.err)
+		l.lang = sitter.NewLanguage(l.grammar)
+		query, qerr := sitter.NewQuery(l.lang, l.pattern)
+		if qerr != nil {
+			l.err = fmt.Errorf("funcscan: запрос для языка %s: %s", l.Name, qerr.Error())
+			return
 		}
+		l.query = query
 	})
-	return l.query, l.err
+	return l.lang, l.query, l.err
 }
 
 // Запросы для JavaScript и TypeScript почти одинаковы, отличается только
@@ -98,59 +101,55 @@ const typescriptFunctions = ecmaScriptFunctions + `
 `
 
 var (
-	langBash = &Language{Name: "bash", grammar: bash.GetLanguage(), pattern: `
+	langBash = &Language{Name: "bash", grammar: tree_sitter_bash.Language(), pattern: `
 (function_definition name: (word) @name) @func
 `}
-	langC = &Language{Name: "c", grammar: c.GetLanguage(), pattern: `
+	langC = &Language{Name: "c", grammar: tree_sitter_c.Language(), pattern: `
 (function_definition declarator: (_) @decl) @func
 `}
-	langCPP = &Language{Name: "cpp", grammar: cpp.GetLanguage(), pattern: `
+	langCPP = &Language{Name: "cpp", grammar: tree_sitter_cpp.Language(), pattern: `
 (function_definition declarator: (_) @decl) @func
 `}
-	langCSharp = &Language{Name: "csharp", grammar: csharp.GetLanguage(), pattern: `
+	langCSharp = &Language{Name: "csharp", grammar: tree_sitter_c_sharp.Language(), pattern: `
 (method_declaration name: (identifier) @name) @func
 (constructor_declaration name: (identifier) @name) @func
 (local_function_statement name: (identifier) @name) @func
 `}
-	langGo = &Language{Name: "go", grammar: golang.GetLanguage(), pattern: `
+	langGo = &Language{Name: "go", grammar: tree_sitter_go.Language(), pattern: `
 (function_declaration name: (identifier) @name) @func
 (method_declaration name: (field_identifier) @name) @func
 `}
-	langJava = &Language{Name: "java", grammar: java.GetLanguage(), pattern: `
+	langJava = &Language{Name: "java", grammar: tree_sitter_java.Language(), pattern: `
 (method_declaration name: (identifier) @name) @func
 (constructor_declaration name: (identifier) @name) @func
 `}
-	langJavaScript = &Language{Name: "javascript", grammar: javascript.GetLanguage(), pattern: javascriptFunctions}
-	langKotlin     = &Language{Name: "kotlin", grammar: kotlin.GetLanguage(), pattern: `
-(function_declaration (simple_identifier) @name) @func
+	langJavaScript = &Language{Name: "javascript", grammar: tree_sitter_javascript.Language(), pattern: javascriptFunctions}
+	langKotlin     = &Language{Name: "kotlin", grammar: tree_sitter_kotlin.Language(), pattern: `
+(function_declaration name: (_) @name) @func
 `}
-	langLua = &Language{Name: "lua", grammar: lua.GetLanguage(), pattern: `
-(function_statement name: (_) @name) @func
+	langLua = &Language{Name: "lua", grammar: tree_sitter_lua.Language(), pattern: `
+(function_declaration name: (_) @name) @func
 `}
-	langPHP = &Language{Name: "php", grammar: php.GetLanguage(), pattern: `
+	langPHP = &Language{Name: "php", grammar: tree_sitter_php.LanguagePHP(), pattern: `
 (function_definition name: (name) @name) @func
 (method_declaration name: (name) @name) @func
 `}
-	langPython = &Language{Name: "python", grammar: python.GetLanguage(), pattern: `
+	langPython = &Language{Name: "python", grammar: tree_sitter_python.Language(), pattern: `
 (function_definition name: (identifier) @name) @func
 `}
-	langRuby = &Language{Name: "ruby", grammar: ruby.GetLanguage(), pattern: `
+	langRuby = &Language{Name: "ruby", grammar: tree_sitter_ruby.Language(), pattern: `
 (method name: (_) @name) @func
 (singleton_method name: (_) @name) @func
 `}
-	langRust = &Language{Name: "rust", grammar: rust.GetLanguage(), pattern: `
+	langRust = &Language{Name: "rust", grammar: tree_sitter_rust.Language(), pattern: `
 (function_item name: (identifier) @name) @func
 `}
-	langScala = &Language{Name: "scala", grammar: scala.GetLanguage(), pattern: `
+	langScala = &Language{Name: "scala", grammar: tree_sitter_scala.Language(), pattern: `
 (function_definition name: (_) @name) @func
 `}
-	langSwift = &Language{Name: "swift", grammar: swift.GetLanguage(), pattern: `
-(function_declaration name: (simple_identifier) @name) @func
-(init_declaration "init" @name) @func
-`}
-	langTypeScript = &Language{Name: "typescript", grammar: typescript.GetLanguage(), pattern: typescriptFunctions}
+	langTypeScript = &Language{Name: "typescript", grammar: tree_sitter_typescript.LanguageTypescript(), pattern: typescriptFunctions}
 	// TSX — отдельная грамматика, но для пользователя это тот же TypeScript.
-	langTSX = &Language{Name: "typescript", grammar: tsx.GetLanguage(), pattern: typescriptFunctions}
+	langTSX = &Language{Name: "typescript", grammar: tree_sitter_typescript.LanguageTSX(), pattern: typescriptFunctions}
 )
 
 // byName — языки по имени (для WithExtension / LanguageByName).
@@ -158,7 +157,7 @@ var byName = map[string]*Language{
 	"bash": langBash, "c": langC, "cpp": langCPP, "csharp": langCSharp,
 	"go": langGo, "golang": langGo, "java": langJava, "javascript": langJavaScript,
 	"kotlin": langKotlin, "lua": langLua, "php": langPHP, "python": langPython,
-	"ruby": langRuby, "rust": langRust, "scala": langScala, "swift": langSwift,
+	"ruby": langRuby, "rust": langRust, "scala": langScala,
 	"typescript": langTypeScript, "tsx": langTSX,
 }
 
@@ -179,8 +178,7 @@ var byExtension = map[string]*Language{
 	".rb": langRuby, ".rake": langRuby, ".gemspec": langRuby,
 	".rs":    langRust,
 	".scala": langScala, ".sc": langScala,
-	".swift": langSwift,
-	".ts":    langTypeScript, ".mts": langTypeScript, ".cts": langTypeScript,
+	".ts": langTypeScript, ".mts": langTypeScript, ".cts": langTypeScript,
 	".tsx": langTSX,
 }
 

@@ -18,7 +18,7 @@ import (
 	"sort"
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
+	sitter "github.com/tree-sitter/go-tree-sitter"
 )
 
 // Scanner ищет определения функций. Нулевое значение не используется —
@@ -220,47 +220,47 @@ func (s *Scanner) detect(name string) (*Language, bool) {
 
 // extract разбирает исходник и возвращает найденные функции в порядке
 // их появления в файле.
-// extract разбирает исходник и возвращает найденные функции в порядке
-// их появления в файле.
 func extract(ctx context.Context, parser *sitter.Parser, lang *Language, src []byte) ([]Function, error) {
-	query, err := lang.compiled()
+	_, query, err := lang.compiled()
 	if err != nil {
 		return nil, err
 	}
-	parser.SetLanguage(lang.grammar)
-	tree, err := parser.ParseCtx(ctx, nil, src)
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	if err := parser.SetLanguage(lang.lang); err != nil {
+		return nil, fmt.Errorf("funcscan: грамматика языка %s: %w", lang.Name, err)
+	}
+	tree := parser.Parse(src, nil)
+	if tree == nil {
+		return nil, fmt.Errorf("funcscan: не удалось разобрать исходник (%s)", lang.Name)
 	}
 	defer tree.Close()
 
 	cursor := sitter.NewQueryCursor()
 	defer cursor.Close()
-	cursor.Exec(query, tree.RootNode())
+	captureNames := query.CaptureNames()
+	matches := cursor.Matches(query, tree.RootNode(), src)
 
 	var funcs []Function
-	seen := map[uint32]bool{} // один и тот же узел могут поймать несколько шаблонов
-
-	for {
-		match, ok := cursor.NextMatch()
-		if !ok {
-			break
-		}
+	seen := map[uint]bool{} // один и тот же узел могут поймать несколько шаблонов
+	for match := matches.Next(); match != nil; match = matches.Next() {
 		var nameNode, funcNode *sitter.Node
-		for _, capture := range match.Captures {
-			switch query.CaptureNameForId(capture.Index) {
+		for i := range match.Captures {
+			node := match.Captures[i].Node
+			switch captureNames[match.Captures[i].Index] {
 			case captureFunc:
-				funcNode = capture.Node
+				funcNode = &node
 			case captureDecl:
-				nameNode = innermostDeclarator(capture.Node)
+				nameNode = innermostDeclarator(&node)
 			default:
-				nameNode = capture.Node
+				nameNode = &node
 			}
 		}
 		if nameNode == nil || seen[nameNode.StartByte()] {
 			continue
 		}
-		name := strings.TrimSpace(nameNode.Content(src))
+		name := strings.TrimSpace(nameNode.Utf8Text(src))
 		if name == "" {
 			continue
 		}
@@ -270,14 +270,14 @@ func extract(ctx context.Context, parser *sitter.Parser, lang *Language, src []b
 		seen[nameNode.StartByte()] = true
 		funcs = append(funcs, Function{
 			Name:      name,
-			Line:      int(funcNode.StartPoint().Row) + 1,
-			EndLine:   int(funcNode.EndPoint().Row) + 1,
-			StartByte: funcNode.StartByte(),
-			EndByte:   funcNode.EndByte(),
+			Line:      int(funcNode.StartPosition().Row) + 1,
+			EndLine:   int(funcNode.EndPosition().Row) + 1,
+			StartByte: uint32(funcNode.StartByte()),
+			EndByte:   uint32(funcNode.EndByte()),
 			Language:  lang.Name,
 		})
 	}
-	sort.SliceStable(funcs, func(i, j int) bool { return funcs[i].Line < funcs[j].Line })
+	sort.SliceStable(funcs, func(i, j int) bool { return funcs[i].StartByte < funcs[j].StartByte })
 	return funcs, nil
 }
 
@@ -287,14 +287,14 @@ func extract(ctx context.Context, parser *sitter.Parser, lang *Language, src []b
 func innermostDeclarator(n *sitter.Node) *sitter.Node {
 	isFunction := false
 	for n != nil {
-		if n.Type() == "function_declarator" {
+		if n.Kind() == "function_declarator" {
 			isFunction = true
 		}
 		next := n.ChildByFieldName("declarator")
 		if next == nil {
 			// У этих обёрток нет поля "declarator": скобки (int (*f(void))(int))
 			// и ссылки C++ (T& f()).
-			t := n.Type()
+			t := n.Kind()
 			if (t == "parenthesized_declarator" || t == "reference_declarator") && n.NamedChildCount() > 0 {
 				n = n.NamedChild(0)
 				continue
