@@ -35,6 +35,9 @@ const (
 	// в указатели/ссылки (int **foo(void)), поэтому сканер спускается по полю
 	// "declarator" до самого вложенного узла.
 	captureDecl = "decl"
+	// captureFunc — узел всего определения функции: по нему берутся
+	// границы (строки и байтовые смещения).
+	captureFunc = "func"
 )
 
 // Language описывает один поддерживаемый язык: грамматику tree-sitter
@@ -65,85 +68,85 @@ func (l *Language) compiled() (*sitter.Query, error) {
 // Запросы для JavaScript и TypeScript почти одинаковы, отличается только
 // узел поля класса.
 const ecmaScriptFunctions = `
-(function_declaration name: (identifier) @name)
-(generator_function_declaration name: (identifier) @name)
-(method_definition name: (_) @name)
+(function_declaration name: (identifier) @name) @func
+(generator_function_declaration name: (identifier) @name) @func
+(method_definition name: (_) @name) @func
 (variable_declarator
   name: (identifier) @name
-  value: [(arrow_function) (function_expression) (generator_function)])
+  value: [(arrow_function) (function_expression) (generator_function)]) @func
 (assignment_expression
   left: (identifier) @name
-  right: [(arrow_function) (function_expression) (generator_function)])
+  right: [(arrow_function) (function_expression) (generator_function)]) @func
 (assignment_expression
   left: (member_expression property: (property_identifier) @name)
-  right: [(arrow_function) (function_expression) (generator_function)])
+  right: [(arrow_function) (function_expression) (generator_function)]) @func
 (pair
   key: (property_identifier) @name
-  value: [(arrow_function) (function_expression) (generator_function)])
+  value: [(arrow_function) (function_expression) (generator_function)]) @func
 `
 
 const javascriptFunctions = ecmaScriptFunctions + `
 (field_definition
   property: (property_identifier) @name
-  value: [(arrow_function) (function_expression)])
+  value: [(arrow_function) (function_expression)]) @func
 `
 
 const typescriptFunctions = ecmaScriptFunctions + `
 (public_field_definition
   name: (property_identifier) @name
-  value: [(arrow_function) (function_expression)])
+  value: [(arrow_function) (function_expression)]) @func
 `
 
 var (
 	langBash = &Language{Name: "bash", grammar: bash.GetLanguage(), pattern: `
-(function_definition name: (word) @name)
+(function_definition name: (word) @name) @func
 `}
 	langC = &Language{Name: "c", grammar: c.GetLanguage(), pattern: `
-(function_definition declarator: (_) @decl)
+(function_definition declarator: (_) @decl) @func
 `}
 	langCPP = &Language{Name: "cpp", grammar: cpp.GetLanguage(), pattern: `
-(function_definition declarator: (_) @decl)
+(function_definition declarator: (_) @decl) @func
 `}
 	langCSharp = &Language{Name: "csharp", grammar: csharp.GetLanguage(), pattern: `
-(method_declaration name: (identifier) @name)
-(constructor_declaration name: (identifier) @name)
-(local_function_statement name: (identifier) @name)
+(method_declaration name: (identifier) @name) @func
+(constructor_declaration name: (identifier) @name) @func
+(local_function_statement name: (identifier) @name) @func
 `}
 	langGo = &Language{Name: "go", grammar: golang.GetLanguage(), pattern: `
-(function_declaration name: (identifier) @name)
-(method_declaration name: (field_identifier) @name)
+(function_declaration name: (identifier) @name) @func
+(method_declaration name: (field_identifier) @name) @func
 `}
 	langJava = &Language{Name: "java", grammar: java.GetLanguage(), pattern: `
-(method_declaration name: (identifier) @name)
-(constructor_declaration name: (identifier) @name)
+(method_declaration name: (identifier) @name) @func
+(constructor_declaration name: (identifier) @name) @func
 `}
 	langJavaScript = &Language{Name: "javascript", grammar: javascript.GetLanguage(), pattern: javascriptFunctions}
 	langKotlin     = &Language{Name: "kotlin", grammar: kotlin.GetLanguage(), pattern: `
-(function_declaration (simple_identifier) @name)
+(function_declaration (simple_identifier) @name) @func
 `}
 	langLua = &Language{Name: "lua", grammar: lua.GetLanguage(), pattern: `
-(function_statement name: (_) @name)
+(function_statement name: (_) @name) @func
 `}
 	langPHP = &Language{Name: "php", grammar: php.GetLanguage(), pattern: `
-(function_definition name: (name) @name)
-(method_declaration name: (name) @name)
+(function_definition name: (name) @name) @func
+(method_declaration name: (name) @name) @func
 `}
 	langPython = &Language{Name: "python", grammar: python.GetLanguage(), pattern: `
-(function_definition name: (identifier) @name)
+(function_definition name: (identifier) @name) @func
 `}
 	langRuby = &Language{Name: "ruby", grammar: ruby.GetLanguage(), pattern: `
-(method name: (_) @name)
-(singleton_method name: (_) @name)
+(method name: (_) @name) @func
+(singleton_method name: (_) @name) @func
 `}
 	langRust = &Language{Name: "rust", grammar: rust.GetLanguage(), pattern: `
-(function_item name: (identifier) @name)
+(function_item name: (identifier) @name) @func
 `}
 	langScala = &Language{Name: "scala", grammar: scala.GetLanguage(), pattern: `
-(function_definition name: (_) @name)
+(function_definition name: (_) @name) @func
 `}
 	langSwift = &Language{Name: "swift", grammar: swift.GetLanguage(), pattern: `
-(function_declaration name: (simple_identifier) @name)
-(init_declaration "init" @name)
+(function_declaration name: (simple_identifier) @name) @func
+(init_declaration "init" @name) @func
 `}
 	langTypeScript = &Language{Name: "typescript", grammar: typescript.GetLanguage(), pattern: typescriptFunctions}
 	// TSX — отдельная грамматика, но для пользователя это тот же TypeScript.
