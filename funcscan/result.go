@@ -8,9 +8,13 @@ import (
 // Function — одно найденное определение функции или метода.
 type Function struct {
 	Name     string `json:"name"`
-	File     string `json:"file"`     // путь относительно корня сканирования
-	Line     int    `json:"line"`     // строка, с которой начинается имя (с 1)
-	Language string `json:"language"` // язык файла
+	File     string `json:"file"`
+	Line     int    `json:"line"`     // первая строка определения (с 1)
+	EndLine  int    `json:"end_line"` // последняя строка определения
+	Language string `json:"language"`
+
+	StartByte uint32 `json:"-"` // границы определения в файле
+	EndByte   uint32 `json:"-"`
 }
 
 // Module — один компонент проекта, то есть одна папка с исходниками.
