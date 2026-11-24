@@ -232,7 +232,10 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
   rebuildLodCache();
 
-  const renderer = new Sigma(graph, sigmaEl, {
+  // Declared with let so edgeReducer/nodeReducer can safely reference it
+  // before the assignment completes (renderer is undefined, not TDZ).
+  let renderer;
+  renderer = new Sigma(graph, sigmaEl, {
     renderEdgeLabels:     false,
     defaultEdgeType:      'arrow',
     defaultNodeColor:     '#58a6ff',
@@ -283,6 +286,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     edgeReducer: (edge, data) => {
       const result = { ...data };
+      // renderer is not yet assigned when Sigma calls this during construction,
+      // so we read the camera lazily via the sigma instance reference below.
       const ratio  = renderer ? renderer.getCamera().ratio : 1;
 
       // Fade edges when very zoomed out.
@@ -696,6 +701,40 @@ document.addEventListener('DOMContentLoaded', async () => {
       result.hidden = true;
     }
     return result;
+  });
+
+  // ── Panel resize ───────────────────────────────────────────────────────
+  const resizeHandle = document.getElementById('panel-resize');
+  let resizing = false;
+  let resizeStartX = 0;
+  let resizeStartW = 0;
+
+  resizeHandle.addEventListener('mousedown', e => {
+    e.preventDefault();
+    resizing    = true;
+    resizeStartX = e.clientX;
+    resizeStartW = codePanel.offsetWidth;
+    resizeHandle.classList.add('dragging');
+    document.body.style.cursor    = 'ew-resize';
+    document.body.style.userSelect = 'none';
+  });
+
+  document.addEventListener('mousemove', e => {
+    if (!resizing) return;
+    // Panel is on the right; dragging left = wider, right = narrower.
+    const delta   = resizeStartX - e.clientX;
+    const minW    = parseInt(getComputedStyle(codePanel).minWidth) || 260;
+    const maxW    = Math.round(window.innerWidth * 0.9);
+    const newW    = Math.min(maxW, Math.max(minW, resizeStartW + delta));
+    codePanel.style.width = newW + 'px';
+  });
+
+  document.addEventListener('mouseup', () => {
+    if (!resizing) return;
+    resizing = false;
+    resizeHandle.classList.remove('dragging');
+    document.body.style.cursor     = '';
+    document.body.style.userSelect = '';
   });
 
   // ── Utility ────────────────────────────────────────────────────────────

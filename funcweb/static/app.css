@@ -65,7 +65,6 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); color: var(-
   flex: 1;
   position: relative;
   overflow: hidden;
-  transition: width var(--transition);
 }
 
 #sigma-canvas {
@@ -73,25 +72,46 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); color: var(-
   inset: 0;
 }
 
-/* ── Code panel ──────────────────────────────────────────────────────────── */
+/* ── Code panel — overlays the graph, resizable ──────────────────────────── */
 #code-panel {
   width: var(--panel-w);
-  flex-shrink: 0;
+  min-width: 260px;
+  max-width: 90vw;
   display: flex;
   flex-direction: column;
   background: var(--surface);
   border-left: 1px solid var(--border);
-  transform: translateX(100%);
-  transition: transform var(--transition);
+  /* overlay: sits on top of the graph, does not shrink it */
   position: absolute;
   right: 0;
   top: 0;
   bottom: 0;
-  z-index: 5;
+  z-index: 20;
+  transform: translateX(100%);
+  transition: transform var(--transition);
+  /* shadow so it feels elevated */
+  box-shadow: -6px 0 24px rgba(0,0,0,.45);
 }
 
 #code-panel.open {
   transform: translateX(0);
+}
+
+/* ── Resize handle ───────────────────────────────────────────────────────── */
+#panel-resize {
+  position: absolute;
+  left: -4px;
+  top: 0;
+  bottom: 0;
+  width: 8px;
+  cursor: ew-resize;
+  z-index: 21;
+  background: transparent;
+  /* subtle visual cue on hover */
+}
+#panel-resize:hover,
+#panel-resize.dragging {
+  background: rgba(88,166,255,.25);
 }
 
 #panel-header {
