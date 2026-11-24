@@ -5,7 +5,7 @@ import (
 	sitter "github.com/tree-sitter/go-tree-sitter"
 	tree_sitter_cpp "github.com/tree-sitter/tree-sitter-cpp/bindings/go"
 
-	"github.com/notrobot1/funcscan/lang"
+	"github.com/notrobot1/funcscan/relationships/lang"
 )
 
 var nameKinds = []string{"identifier", "field_identifier", "destructor_name", "operator_name"}
