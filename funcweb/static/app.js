@@ -367,21 +367,16 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // 4. Hover ────────────────────────────────────────────────────────────
   function computeSubtree(id) {
-    // Outgoing: full depth (all callees recursively).
-    const nodes=new Set([id]), edges=new Set(), q=[id], vis=new Set([id]);
-    while(q.length){
-      const cur=q.shift();
-      graph.outEdges(cur).forEach(eid=>{
-        const t=graph.target(eid); edges.add(eid);
-        if(!vis.has(t)){vis.add(t);nodes.add(t);q.push(t);}
-      });
-    }
-    // Incoming: depth 1 only (direct callers).
-    graph.inEdges(id).forEach(eid=>{
-      const s=graph.source(eid);
-      edges.add(eid); nodes.add(s);
+    const nodes = new Set([id]), edges = new Set();
+    // Outgoing: depth 1 only (direct callees).
+    graph.outEdges(id).forEach(eid => {
+      edges.add(eid); nodes.add(graph.target(eid));
     });
-    return {nodes,edges};
+    // Incoming: depth 1 only (direct callers).
+    graph.inEdges(id).forEach(eid => {
+      edges.add(eid); nodes.add(graph.source(eid));
+    });
+    return {nodes, edges};
   }
 
   renderer.on('enterNode',({node,event})=>{
