@@ -9,6 +9,7 @@ require (
 
 require (
 	github.com/mattn/go-pointer v0.0.1 // indirect
+	github.com/notrobot1/anti_entry_points/inputclf v0.0.0-20261122140732-c9358901fb0e // indirect
 	github.com/notrobot1/funcscan/relationships v0.0.0 // indirect
 	github.com/tree-sitter-grammars/tree-sitter-kotlin v1.1.0 // indirect
 	github.com/tree-sitter-grammars/tree-sitter-lua v0.5.0 // indirect

@@ -302,7 +302,10 @@ document.addEventListener('DOMContentLoaded', async () => {
       // Multiply by ratio to fully cancel that growth: nodes stay the same
       // screen-pixel size regardless of zoom level.
       const ratio = renderer ? renderer.getCamera().ratio : 1;
-      r.size = Math.max(0.3, data.size * ratio * ratio * ratio);
+      // zoom in (ratio < 1): shrink nodes so they don't become huge blobs.
+      // zoom out (ratio > 1): keep original size — don't scale up.
+      const sizeScale = ratio < 1 ? ratio * ratio * ratio : 1;
+      r.size = Math.max(0.3, data.size * sizeScale);
 
       // Show label only for hovered node and its subtree.
       if (!hoveredSubtree || !hoveredSubtree.nodes.has(node)) {
@@ -312,8 +315,11 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (hoveredNode && hoveredSubtree && !hoveredSubtree.nodes.has(node)) {
         r.color='#1e2a35'; return r;
       }
-      if (node===selectedNode) r.highlighted=true;
-      if (node===hoveredNode)  { r.size*=1.6; r.color='#fff'; }
+      if (node===selectedNode) {
+        r.highlighted = true;
+        r.color = '#ffffff';
+      }
+      if (node===hoveredNode && node!==selectedNode) { r.size*=1.6; r.color='#fff'; }
       return r;
     },
 
@@ -416,51 +422,263 @@ document.addEventListener('DOMContentLoaded', async () => {
     renderer.refresh();
   });
 
-  // 6. Toolbar ──────────────────────────────────────────────────────────
-  document.getElementById('btn-fit').addEventListener('click',()=>{
-    renderer.getCamera().animatedReset();
-  });
-  document.getElementById('btn-layout').addEventListener('click',()=>{
-    startSim(0.6);
-  });
-  document.getElementById('btn-show-all').addEventListener('click',()=>{
-    renderer.getCamera().animatedReset();
-  });
+  // 6. Saved nodes ──────────────────────────────────────────────────────
+  const savedView    = document.getElementById('saved-view');
+  const svTabBar     = document.getElementById('sv-tab-bar');
+  const svList       = document.getElementById('sv-list');
+  const panelSaveBtn = document.getElementById('panel-save-node');
+  let savedMode = false;
+  let activeTabId = 'entry-points';
 
-  document.getElementById('btn-callers-only').addEventListener('click',function(){
-    if(!selectedNode)return;
-    this.classList.toggle('active');
-    document.getElementById('btn-callees-only').classList.remove('active');
-    focusSubtree(selectedNode,'callers');
-  });
-  document.getElementById('btn-callees-only').addEventListener('click',function(){
-    if(!selectedNode)return;
-    this.classList.toggle('active');
-    document.getElementById('btn-callers-only').classList.remove('active');
-    focusSubtree(selectedNode,'callees');
-  });
+  // In-memory cache; synced to backend via persistSaved().
+  let _savedCache = null;
 
-  function focusSubtree(nodeId,dir){
-    const reach=new Set([nodeId]),q=[nodeId];
-    while(q.length){
-      const cur=q.shift();
-      for(const e of(dir==='callers'?(IN_EDGES.get(cur)||[]):(OUT_EDGES.get(cur)||[]))){
-        const nb=dir==='callers'?e.from:e.to;
-        if(!reach.has(nb)){reach.add(nb);q.push(nb);}
-      }
-    }
-    let minX=Infinity,maxX=-Infinity,minY=Infinity,maxY=-Infinity;
-    for(const id of reach){
-      const dn=d3Nodes[nodeIdx[id]]; if(!dn)continue;
-      if(dn.x<minX)minX=dn.x; if(dn.x>maxX)maxX=dn.x;
-      if(dn.y<minY)minY=dn.y; if(dn.y>maxY)maxY=dn.y;
-    }
-    if(!isFinite(minX))return;
-    const rect=sigmaEl.getBoundingClientRect();
-    const ratio=Math.max(0.05,Math.min(5,
-      Math.max((maxX-minX+100)/(rect.width*.8),(maxY-minY+100)/(rect.height*.8))));
-    renderer.getCamera().animate({x:(minX+maxX)/2,y:(minY+maxY)/2,ratio},{duration:500});
+  function loadSaved() {
+    if (_savedCache) return _savedCache;
+    return { tabs: [{ id:'entry-points', name:'Entry Points', permanent:true, nodes:[] }] };
   }
+
+  async function fetchSaved() {
+    try {
+      const res = await fetch('/api/saved');
+      if (!res.ok) throw new Error(res.status);
+      const data = await res.json();
+      // Ensure Entry Points tab always exists as first permanent tab.
+      if (!data.tabs) data.tabs = [];
+      if (!data.tabs.find(t => t.id === 'entry-points')) {
+        data.tabs.unshift({ id:'entry-points', name:'Entry Points', permanent:true, nodes:[] });
+      }
+      _savedCache = data;
+    } catch(_) {
+      _savedCache = { tabs: [{ id:'entry-points', name:'Entry Points', permanent:true, nodes:[] }] };
+    }
+  }
+
+  function persistSaved(data) {
+    _savedCache = data;
+    fetch('/api/saved', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    }).catch(e => console.warn('save failed:', e));
+  }
+
+  // Auto-populate Entry Points with nodes that have no callers
+  function refreshEntryPoints(data) {
+    const ep = data.tabs.find(t => t.id === 'entry-points');
+    if (!ep) return;
+    ep.nodes = RAW_NODES
+      .filter(n => !(IN_EDGES.get(n.id)||[]).length)
+      .map(n => n.id)
+      .slice(0, 200); // cap
+  }
+
+  function renderSavedUI() {
+    const data = loadSaved();
+    // Tab bar
+    svTabBar.innerHTML = '';
+    for (const tab of data.tabs) {
+      const btn = document.createElement('button');
+      btn.className = 'sv-tab' + (tab.id === activeTabId ? ' active' : '');
+      btn.dataset.tabId = tab.id;
+      btn.textContent = tab.name;
+      if (!tab.permanent) {
+        const del = document.createElement('button');
+        del.className = 'sv-tab-close';
+        del.textContent = '✕';
+        del.title = 'Delete tab';
+        del.onclick = e => { e.stopPropagation(); deleteTab(tab.id); };
+        btn.appendChild(del);
+      }
+      btn.addEventListener('click', () => { activeTabId = tab.id; renderSavedUI(); });
+      svTabBar.appendChild(btn);
+    }
+    const addBtn = document.createElement('button');
+    addBtn.id = 'sv-add-tab'; addBtn.textContent = '+'; addBtn.title = 'New tab';
+    addBtn.onclick = addTab;
+    svTabBar.appendChild(addBtn);
+
+    // Node list
+    const tab = data.tabs.find(t => t.id === activeTabId);
+    svList.innerHTML = '';
+    if (!tab || !tab.nodes.length) {
+      svList.innerHTML = '<div class="sv-empty">No saved functions</div>';
+      return;
+    }
+    for (const id of tab.nodes) {
+      const n = NODE_BY_ID.get(id);
+      if (!n) continue;
+      const item = document.createElement('div');
+      item.className = 'sv-item' + (id === selectedNode ? ' active' : '');
+      item.innerHTML = `
+        <div style="flex:1;min-width:0">
+          <div class="sv-item-name">${esc(n.name)}</div>
+          <div class="sv-item-file">${esc(n.file)}</div>
+        </div>
+        ${tab.permanent ? '' : `<button class="sv-item-del" title="Remove">✕</button>`}
+      `;
+      item.querySelector('.sv-item-name')?.parentElement?.addEventListener('click', () => {
+        selectSavedNode(id);
+      });
+      item.addEventListener('click', () => selectSavedNode(id));
+      if (!tab.permanent) {
+        item.querySelector('.sv-item-del')?.addEventListener('click', e => {
+          e.stopPropagation(); removeNodeFromTab(id);
+        });
+      }
+      svList.appendChild(item);
+    }
+  }
+
+  function selectSavedNode(id) {
+    if (!graph.hasNode(id)) return;
+    // Only set selectedNode — don't set hoveredNode/hoveredSubtree so the
+    // rest of the graph stays fully visible (no dimming).
+    selectedNode = id;
+    renderer.refresh();
+    renderSavedUI();
+
+    try {
+      const nx  = graph.getNodeAttribute(id, 'x');
+      const ny  = graph.getNodeAttribute(id, 'y');
+      const cam = renderer.getCamera();
+
+      // Sigma normalizes positions by the graph bounding box:
+      // normCoord = (raw - min) / max(rangeX, rangeY)
+      // Camera x/y live in this same normalized space.
+      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+      graph.forEachNode((_, a) => {
+        if (a.x < minX) minX = a.x; if (a.x > maxX) maxX = a.x;
+        if (a.y < minY) minY = a.y; if (a.y > maxY) maxY = a.y;
+      });
+      const maxDim = Math.max(maxX - minX, maxY - minY) || 1;
+      const normX  = (nx - minX) / maxDim;
+      const normY  = 1 - (ny - minY) / maxDim;  // Sigma flips Y axis
+      // Use a fixed comfortable zoom so the node is always visible.
+      // If currently zoomed out more than 0.3, keep current zoom; otherwise zoom to 0.3.
+      const targetRatio = Math.min(cam.getState().ratio, 0.3);
+      cam.animate({ x: normX, y: normY, ratio: targetRatio }, { duration: 500 });
+    } catch(e) { console.error('navigate error', e); }
+  }
+
+  function addTab() {
+    const name = prompt('Tab name:');
+    if (!name?.trim()) return;
+    const data = loadSaved();
+    data.tabs.push({ id: 'tab-' + Date.now(), name: name.trim(), permanent: false, nodes: [] });
+    persistSaved(data);
+    renderSavedUI();
+  }
+
+  function deleteTab(tabId) {
+    const data = loadSaved();
+    data.tabs = data.tabs.filter(t => t.id !== tabId);
+    if (activeTabId === tabId) activeTabId = 'entry-points';
+    persistSaved(data);
+    renderSavedUI();
+  }
+
+  function removeNodeFromTab(nodeId) {
+    const data = loadSaved();
+    const tab = data.tabs.find(t => t.id === activeTabId);
+    if (tab) tab.nodes = tab.nodes.filter(id => id !== nodeId);
+    persistSaved(data);
+    renderSavedUI();
+  }
+
+  // Save popup
+  const savePopup = document.getElementById('save-popup');
+
+  function openSavePopup(anchorEl) {
+    if (!selectedNode) return;
+    const data = loadSaved();
+    const userTabs = data.tabs.filter(t => !t.permanent);
+
+    savePopup.innerHTML = `<div class="sp-title">Save to tab</div>`;
+
+    if (userTabs.length === 0) {
+      const empty = document.createElement('div');
+      empty.style.cssText = 'padding:8px 14px;font-size:12px;color:var(--text-dim)';
+      empty.textContent = 'No tabs yet';
+      savePopup.appendChild(empty);
+    }
+
+    for (const tab of userTabs) {
+      const already = tab.nodes.includes(selectedNode);
+      const btn = document.createElement('button');
+      btn.className = 'sp-tab-btn' + (already ? ' saved' : '');
+      btn.textContent = (already ? '✓ ' : '') + tab.name;
+      btn.onclick = () => {
+        if (!already) {
+          tab.nodes.push(selectedNode);
+          persistSaved(data);
+        }
+        closeSavePopup();
+        if (savedMode) renderSavedUI();
+      };
+      savePopup.appendChild(btn);
+    }
+
+    const newBtn = document.createElement('button');
+    newBtn.className = 'sp-new-tab';
+    newBtn.textContent = '＋ New tab…';
+    newBtn.onclick = () => {
+      closeSavePopup();
+      const name = prompt('Tab name:');
+      if (!name?.trim()) return;
+      const d = loadSaved();
+      const newTab = { id: 'tab-' + Date.now(), name: name.trim(), permanent: false, nodes: [selectedNode] };
+      d.tabs.push(newTab);
+      persistSaved(d);
+      activeTabId = newTab.id;
+      if (savedMode) renderSavedUI();
+    };
+    savePopup.appendChild(newBtn);
+
+    // Position below the anchor button
+    const rect = anchorEl.getBoundingClientRect();
+    savePopup.style.display = 'block';
+    savePopup.style.top  = (rect.bottom + 6) + 'px';
+    savePopup.style.right = (window.innerWidth - rect.right) + 'px';
+    savePopup.style.left = 'auto';
+  }
+
+  function closeSavePopup() {
+    savePopup.style.display = 'none';
+  }
+
+  document.addEventListener('click', e => {
+    if (!savePopup.contains(e.target) && e.target !== panelSaveBtn) closeSavePopup();
+  });
+
+  panelSaveBtn.addEventListener('click', e => {
+    e.stopPropagation();
+    if (savePopup.style.display === 'none') openSavePopup(panelSaveBtn);
+    else closeSavePopup();
+  });
+
+  function setSavedMode(on) {
+    savedMode = on;
+    savedView.style.display = on ? 'flex' : 'none';
+    codeScroll.style.display = on ? 'none' : '';
+    document.getElementById('panel-meta').style.display = on ? 'none' : '';
+    document.getElementById('panel-fn-name').textContent = on ? 'Saved' : '';
+    document.getElementById('panel-file-path').textContent = '';
+    panelSaveBtn.style.display = on ? 'none' : (selectedNode ? 'block' : 'none');
+    document.getElementById('btn-saved').classList.toggle('active', on);
+    if (on) {
+      codePanel.classList.add('open');
+      const data = loadSaved();
+      refreshEntryPoints(data);
+      persistSaved(data);
+      renderSavedUI();
+    }
+  }
+
+  document.getElementById('btn-saved').addEventListener('click', async () => {
+    if (!savedMode) await fetchSaved();
+    setSavedMode(!savedMode);
+  });
 
   // 7. Code panel ───────────────────────────────────────────────────────
   document.getElementById('panel-close').addEventListener('click',()=>{
@@ -471,6 +689,13 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   async function openCodePanel(nodeId){
     const a=graph.getNodeAttributes(nodeId);
+    // Always show code view, hide saved view.
+    savedMode = false;
+    savedView.style.display   = 'none';
+    codeScroll.style.display  = '';
+    document.getElementById('panel-meta').style.display = '';
+    document.getElementById('btn-saved').classList.remove('active');
+    panelSaveBtn.style.display = 'inline-block';
     codePanel.classList.add('open');
     panelFnName.textContent   =a.label;
     panelFilePath.textContent =a._file;
@@ -486,6 +711,11 @@ document.addEventListener('DOMContentLoaded', async () => {
       if(!res.ok){codeOutput.innerHTML='<div class="code-loading">Could not load.</div>';return;}
       const data=await res.json();
       renderCode(data.content,data.language,a._startLine,a._endLine);
+      // Fire-and-forget: classify entry point, add to saved tab if positive.
+      fetch(`/api/analyze/${encodeURIComponent(nodeId)}`)
+        .then(r=>r.ok?r.json():null)
+        .then(res=>{ if(res?.is_entry_point && savedMode) renderSavedUI(); })
+        .catch(()=>{});
     }catch(e){codeOutput.innerHTML=`<div class="code-loading">Error: ${e.message}</div>`;}
   }
 

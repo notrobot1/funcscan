@@ -2,7 +2,10 @@ module github.com/notrobot1/funcscan/funcweb
 
 go 1.23
 
-require github.com/notrobot1/funcscan/funcgraph v0.0.0
+require (
+	github.com/notrobot1/anti_entry_points/inputclf v0.0.0-20261122140732-c9358901fb0e
+	github.com/notrobot1/funcscan/funcgraph v0.0.0
+)
 
 require (
 	github.com/mattn/go-pointer v0.0.1 // indirect

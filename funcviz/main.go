@@ -231,6 +231,17 @@ func main() {
 		srv.Shutdown(ctx) //nolint:errcheck
 	}()
 
+	// Run analysis on all functions that haven't been cached yet.
+	log.Printf("analyzing functions…")
+	if err := srv.AnalyzeAll(func(done, total int) {
+		progress("analysis", done, total)
+	}); err != nil {
+		fmt.Println()
+		log.Printf("warning: analysis failed: %v", err)
+	} else {
+		fmt.Println()
+	}
+
 	log.Printf("listening on %s", srv.Addr())
 	fmt.Printf("\n  → open %s in your browser\n\n", srv.Addr())
 

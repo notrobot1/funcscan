@@ -16,6 +16,7 @@ var (
 	bucketScanMeta  = []byte("_scan_meta")  // scan progress metadata
 	bucketScanDone  = []byte("_scan_done")  // set of processed function names
 	bucketLayout    = []byte("_layout")     // nodeId → JSON Position
+	bucketConfig    = []byte("_config")     // arbitrary JSON config (saved tabs, etc.)
 )
 
 // scanStatus values stored in bucketScanMeta under key "status".
@@ -80,7 +81,7 @@ func (l *LatticeDB) initBuckets() error {
 	return l.db.Update(func(tx *bbolt.Tx) error {
 		for _, name := range [][]byte{
 			bucketNodes, bucketEdges, bucketOutIdx, bucketInIdx,
-			bucketScanMeta, bucketScanDone, bucketLayout,
+			bucketScanMeta, bucketScanDone, bucketLayout, bucketConfig,
 		} {
 			if _, err := tx.CreateBucketIfNotExists(name); err != nil {
 				return fmt.Errorf("funcgraph: create bucket %s: %w", name, err)
@@ -372,4 +373,24 @@ func appendIndex(b *bbolt.Bucket, key, value string) error {
 		return err
 	}
 	return b.Put([]byte(key), data)
+}
+
+// GetConfig returns the raw JSON stored under key (empty slice if not set).
+func (l *LatticeDB) GetConfig(key string) ([]byte, error) {
+	var data []byte
+	err := l.db.View(func(tx *bbolt.Tx) error {
+		v := tx.Bucket(bucketConfig).Get([]byte(key))
+		if v != nil {
+			data = append([]byte{}, v...)
+		}
+		return nil
+	})
+	return data, err
+}
+
+// SetConfig stores raw JSON under key.
+func (l *LatticeDB) SetConfig(key string, value []byte) error {
+	return l.db.Update(func(tx *bbolt.Tx) error {
+		return tx.Bucket(bucketConfig).Put([]byte(key), value)
+	})
 }
