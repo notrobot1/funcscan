@@ -33,6 +33,36 @@ import (
 	"github.com/notrobot1/funcscan/funcweb"
 )
 
+// progress renders a single-line progress bar that overwrites itself in place.
+// Call with done==total to print a final "done" line with a newline.
+func progress(phase string, done, total int) {
+	const barWidth = 30
+	var bar string
+	if total > 0 {
+		filled := barWidth * done / total
+		if filled > barWidth {
+			filled = barWidth
+		}
+		bar = "[" + strings.Repeat("█", filled) + strings.Repeat("░", barWidth-filled) + "]"
+	} else {
+		bar = "[" + strings.Repeat("░", barWidth) + "]"
+	}
+
+	var pct string
+	if total > 0 {
+		pct = fmt.Sprintf("%3d%%", 100*done/total)
+	} else {
+		pct = "  ?%"
+	}
+
+	line := fmt.Sprintf("  %-12s %s %s  %d/%d", phase, bar, pct, done, total)
+	if done == total && total > 0 {
+		fmt.Printf("\r%s\n", line)
+	} else {
+		fmt.Printf("\r%s", line)
+	}
+}
+
 func main() {
 	// Parse flags manually so they can appear in any order relative to the
 	// positional path argument (the standard flag package stops at the first
@@ -117,10 +147,8 @@ func main() {
 		if err := os.Remove(dbPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 			fatal("remove old database: %v", err)
 		}
-		log.Printf("removed old database, rebuilding…")
+		log.Printf("removed old database, rebuilding from scratch")
 	}
-
-	dbExists := fileExists(dbPath)
 
 	log.Printf("database: %s", dbPath)
 	db, err := funcgraph.Open(dbPath)
@@ -129,16 +157,41 @@ func main() {
 	}
 	defer db.Close()
 
-	// ── Scan source tree ─────────────────────────────────────────────────
-	if !dbExists || cfg.rebuild {
-		opts := &funcgraph.ScanOptions{}
+	// ── Decide whether to scan ────────────────────────────────────────────
+	state, err := db.ScanStateGet()
+	if err != nil {
+		fatal("read scan state: %v", err)
+	}
+
+	needScan := cfg.rebuild || state.Status != "done" || state.Root != absRoot
+
+	if !needScan {
+		fns, _   := db.Functions()
+		edges, _ := db.AllEdges()
+		log.Printf("graph ready: %d functions, %d edges (pass -rebuild to rescan)", len(fns), len(edges))
+	} else {
+		opts := &funcgraph.ScanOptions{
+			Progress: progress,
+		}
 		if cfg.skip != "" {
 			opts.SkipDirs = strings.Split(cfg.skip, ",")
 		}
 
-		log.Printf("scanning %s …", absRoot)
+		switch {
+		case cfg.rebuild:
+			log.Printf("scanning %s (full rebuild)…", absRoot)
+		case state.Status == "scanning" && state.Root == absRoot:
+			fns, _  := db.Functions()
+			done, _ := db.ScanStateGet()
+			log.Printf("resuming interrupted scan of %s (%d functions already stored, phase %s)…",
+				absRoot, len(fns), done.Phase)
+		default:
+			log.Printf("scanning %s …", absRoot)
+		}
+
 		start := time.Now()
 		if err := db.ScanAndStore(absRoot, opts); err != nil {
+			fmt.Println() // end progress line before error
 			fatal("scan: %v", err)
 		}
 
@@ -146,11 +199,6 @@ func main() {
 		edges, _ := db.AllEdges()
 		log.Printf("done in %s — %d functions, %d edges",
 			time.Since(start).Round(time.Millisecond), len(fns), len(edges))
-	} else {
-		fns, _   := db.Functions()
-		edges, _ := db.AllEdges()
-		log.Printf("using existing database: %d functions, %d edges", len(fns), len(edges))
-		log.Printf("(pass -rebuild to rescan)")
 	}
 
 	// ── Start web server ─────────────────────────────────────────────────

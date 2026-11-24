@@ -43,6 +43,10 @@ type Edge struct {
 type ScanOptions struct {
 	SkipDirs    []string
 	MaxFileSize int64
+	// Progress is called periodically during scanning.
+	// phase is "definitions" or "edges", done and total are item counts.
+	// May be nil.
+	Progress func(phase string, done, total int)
 }
 
 // Direction controls traversal direction in graph queries.

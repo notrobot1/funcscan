@@ -9,11 +9,26 @@ import (
 )
 
 var (
-	bucketNodes  = []byte("nodes")
-	bucketEdges  = []byte("edges")
-	bucketOutIdx = []byte("out_idx") // from → []to  (callees index)
-	bucketInIdx  = []byte("in_idx")  // to   → []from (callers index)
+	bucketNodes     = []byte("nodes")
+	bucketEdges     = []byte("edges")
+	bucketOutIdx    = []byte("out_idx")     // from → []to  (callees index)
+	bucketInIdx     = []byte("in_idx")      // to   → []from (callers index)
+	bucketScanMeta  = []byte("_scan_meta")  // scan progress metadata
+	bucketScanDone  = []byte("_scan_done")  // set of processed function names
 )
+
+// scanStatus values stored in bucketScanMeta under key "status".
+const (
+	scanStatusScanning = "scanning"
+	scanStatusDone     = "done"
+)
+
+// ScanState describes the persisted state of an in-progress or completed scan.
+type ScanState struct {
+	Status string // "scanning" | "done" | "" (never started)
+	Phase  string // "1" (definitions) | "2" (edges)
+	Root   string // absolute root directory of the scan
+}
 
 // LatticeDB is an embedded graph database backed by bbolt.
 // It stores function nodes and their call-dependency edges.
@@ -62,13 +77,93 @@ func OpenMemory() (*LatticeDB, error) {
 
 func (l *LatticeDB) initBuckets() error {
 	return l.db.Update(func(tx *bbolt.Tx) error {
-		for _, name := range [][]byte{bucketNodes, bucketEdges, bucketOutIdx, bucketInIdx} {
+		for _, name := range [][]byte{
+			bucketNodes, bucketEdges, bucketOutIdx, bucketInIdx,
+			bucketScanMeta, bucketScanDone,
+		} {
 			if _, err := tx.CreateBucketIfNotExists(name); err != nil {
 				return fmt.Errorf("funcgraph: create bucket %s: %w", name, err)
 			}
 		}
 		return nil
 	})
+}
+
+// ── Scan-state helpers ───────────────────────────────────────────────────────
+
+// ScanStateGet returns the current persisted scan state.
+func (l *LatticeDB) ScanStateGet() (ScanState, error) {
+	var s ScanState
+	err := l.db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(bucketScanMeta)
+		get := func(k string) string {
+			v := b.Get([]byte(k))
+			if v == nil {
+				return ""
+			}
+			return string(v)
+		}
+		s.Status = get("status")
+		s.Phase  = get("phase")
+		s.Root   = get("root")
+		return nil
+	})
+	return s, err
+}
+
+// scanStateSet writes the scan state inside a write transaction.
+func (l *LatticeDB) scanStateSet(status, phase, root string) error {
+	return l.db.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(bucketScanMeta)
+		for k, v := range map[string]string{
+			"status": status,
+			"phase":  phase,
+			"root":   root,
+		} {
+			if err := b.Put([]byte(k), []byte(v)); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// ScanStateClear removes all scan-progress metadata and processed-name records.
+// Call this before a fresh scan.
+func (l *LatticeDB) ScanStateClear() error {
+	return l.db.Update(func(tx *bbolt.Tx) error {
+		if err := tx.DeleteBucket(bucketScanMeta); err != nil && err != bbolt.ErrBucketNotFound {
+			return err
+		}
+		if err := tx.DeleteBucket(bucketScanDone); err != nil && err != bbolt.ErrBucketNotFound {
+			return err
+		}
+		for _, name := range [][]byte{bucketScanMeta, bucketScanDone} {
+			if _, err := tx.CreateBucket(name); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// scanMarkDone records that a function name has been processed in Phase 2.
+func (l *LatticeDB) scanMarkDone(name string) error {
+	return l.db.Update(func(tx *bbolt.Tx) error {
+		return tx.Bucket(bucketScanDone).Put([]byte(name), []byte{1})
+	})
+}
+
+// scanIsDone returns the full set of already-processed function names.
+func (l *LatticeDB) scanIsDone() (map[string]struct{}, error) {
+	out := make(map[string]struct{})
+	err := l.db.View(func(tx *bbolt.Tx) error {
+		return tx.Bucket(bucketScanDone).ForEach(func(k, _ []byte) error {
+			out[string(k)] = struct{}{}
+			return nil
+		})
+	})
+	return out, err
 }
 
 // Close closes the database, removing the backing file for memory instances.

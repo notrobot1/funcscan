@@ -15,46 +15,119 @@ import (
 // It performs two passes:
 //  1. Collect every function definition → store as FuncNode.
 //  2. For each unique function name, find all call sites and add edges.
+// ScanAndStore scans the source tree at root, discovers all named function
+// definitions, infers call-dependency edges via the relationships package,
+// and stores the resulting graph in the database.
+//
+// The scan is resumable: if a previous run was interrupted, the next call with
+// the same root will continue from the last saved checkpoint rather than
+// starting over. Pass opts.Resume = false (or use -rebuild in the CLI) to
+// force a full re-scan.
 func (l *LatticeDB) ScanAndStore(root string, opts *ScanOptions) error {
 	fsOpts := &funcscan.Options{CodeOnly: true}
+	var progress func(phase string, done, total int)
 	if opts != nil {
 		fsOpts.SkipDirs = opts.SkipDirs
 		fsOpts.MaxFileSize = opts.MaxFileSize
+		progress = opts.Progress
+	}
+	report := func(phase string, done, total int) {
+		if progress != nil {
+			progress(phase, done, total)
+		}
 	}
 
-	// Phase 1: discover all function definitions.
-	defs, err := funcscan.Definitions(root, fsOpts)
+	// ── Check for a resumable interrupted scan ───────────────────────────
+	state, err := l.ScanStateGet()
 	if err != nil {
-		return fmt.Errorf("funcgraph: scan definitions: %w", err)
+		return fmt.Errorf("funcgraph: read scan state: %w", err)
 	}
 
-	// Store nodes and build a name → []FuncNode lookup table.
-	byName := make(map[string][]FuncNode, len(defs))
-	for _, d := range defs {
-		fn := FuncNode{
-			ID:        nodeID(d.File, d.StartLine),
-			Name:      d.Name,
-			File:      d.File,
-			StartLine: d.StartLine,
-			EndLine:   d.EndLine,
-			Language:  d.Language,
+	resuming := state.Status == scanStatusScanning &&
+		state.Root == root &&
+		state.Phase == "2"
+
+	var byName map[string][]FuncNode
+
+	if resuming {
+		// Phase 1 already completed — rebuild byName from stored nodes.
+		report("definitions", 0, 0)
+		existing, err := l.Functions()
+		if err != nil {
+			return fmt.Errorf("funcgraph: load existing nodes: %w", err)
 		}
-		if err := l.AddFunction(fn); err != nil {
-			return fmt.Errorf("funcgraph: store %s: %w", fn.ID, err)
+		byName = make(map[string][]FuncNode, len(existing))
+		for _, fn := range existing {
+			byName[fn.Name] = append(byName[fn.Name], fn)
 		}
-		byName[fn.Name] = append(byName[fn.Name], fn)
+		report("definitions", len(existing), len(existing))
+	} else {
+		// Fresh scan: clear any stale checkpoint data.
+		if err := l.ScanStateClear(); err != nil {
+			return fmt.Errorf("funcgraph: clear scan state: %w", err)
+		}
+		if err := l.scanStateSet(scanStatusScanning, "1", root); err != nil {
+			return err
+		}
+
+		// Phase 1: discover all function definitions.
+		report("definitions", 0, 0)
+		defs, err := funcscan.Definitions(root, fsOpts)
+		if err != nil {
+			return fmt.Errorf("funcgraph: scan definitions: %w", err)
+		}
+
+		byName = make(map[string][]FuncNode, len(defs))
+		for i, d := range defs {
+			fn := FuncNode{
+				ID:        nodeID(d.File, d.StartLine),
+				Name:      d.Name,
+				File:      d.File,
+				StartLine: d.StartLine,
+				EndLine:   d.EndLine,
+				Language:  d.Language,
+			}
+			if err := l.AddFunction(fn); err != nil {
+				return fmt.Errorf("funcgraph: store %s: %w", fn.ID, err)
+			}
+			byName[fn.Name] = append(byName[fn.Name], fn)
+			if i%50 == 0 {
+				report("definitions", i+1, len(defs))
+			}
+		}
+		report("definitions", len(defs), len(defs))
+
+		if err := l.scanStateSet(scanStatusScanning, "2", root); err != nil {
+			return err
+		}
 	}
 
-	// Phase 2: for each unique name find call sites → build edges.
-	seen := make(map[string]bool, len(byName))
-	for _, d := range defs {
-		if seen[d.Name] {
+	// ── Phase 2: for each unique name find call sites → build edges ──────
+	// Load the set of names already processed in a previous (interrupted) run.
+	alreadyDone, err := l.scanIsDone()
+	if err != nil {
+		return fmt.Errorf("funcgraph: load checkpoint: %w", err)
+	}
+
+	uniqueNames := make([]string, 0, len(byName))
+	for name := range byName {
+		uniqueNames = append(uniqueNames, name)
+	}
+	total := len(uniqueNames)
+	done  := len(alreadyDone)
+
+	for _, d := range uniqueNames {
+		if _, skip := alreadyDone[d]; skip {
 			continue
 		}
-		seen[d.Name] = true
 
-		refs, err := funcscan.FindByName(root, d.Name)
+		done++
+		report("edges", done, total)
+
+		refs, err := funcscan.FindByName(root, d)
 		if err != nil {
+			// Mark as processed even on error so we don't retry endlessly.
+			l.scanMarkDone(d) //nolint:errcheck
 			continue
 		}
 		for _, ref := range refs {
@@ -70,7 +143,7 @@ func (l *LatticeDB) ScanAndStore(root string, opts *ScanOptions) error {
 			if callerNode == nil {
 				continue
 			}
-			calleeNodes := byName[d.Name]
+			calleeNodes := byName[d]
 			if len(calleeNodes) == 0 {
 				continue
 			}
@@ -93,8 +166,15 @@ func (l *LatticeDB) ScanAndStore(root string, opts *ScanOptions) error {
 				return fmt.Errorf("funcgraph: add edge: %w", err)
 			}
 		}
+
+		// Checkpoint: mark this name as fully processed.
+		if err := l.scanMarkDone(d); err != nil {
+			return fmt.Errorf("funcgraph: checkpoint: %w", err)
+		}
 	}
-	return nil
+
+	// Mark scan complete so the next run won't re-scan.
+	return l.scanStateSet(scanStatusDone, "2", root)
 }
 
 // nodeID returns a stable unique ID for a function definition.
