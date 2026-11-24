@@ -308,79 +308,69 @@ document.addEventListener('DOMContentLoaded', async () => {
   loadingText.textContent = 'Computing layout…';
 
   // ── d3-force layout ───────────────────────────────────────────────────
-  // d3-force works with plain node/link arrays; we sync positions back to
-  // the graphology graph after each tick so Sigma re-renders live.
+  // We drive d3-force manually with requestAnimationFrame (never call
+  // .restart() — that starts d3's internal timer which conflicts).
 
-  let d3Simulation = null;
-  let d3Running    = false;
-  const btnLayout  = document.getElementById('btn-layout');
+  const btnLayout = document.getElementById('btn-layout');
+  let d3Running   = false;
+  let d3RafId     = null;
 
-  function buildD3Sim() {
-    // Build node and link arrays from the graphology graph.
-    const d3Nodes = [];
-    const d3Links = [];
+  // Build d3 node/link arrays once; reuse across start/stop.
+  const d3Nodes = [];
+  const d3Links = [];
+  {
     const idxById = {};
-
     graph.forEachNode((id, attrs) => {
-      const idx = d3Nodes.length;
-      idxById[id] = idx;
+      idxById[id] = d3Nodes.length;
       d3Nodes.push({ id, x: attrs.x, y: attrs.y });
     });
     graph.forEachEdge((_, __, src, tgt) => {
-      if (idxById[src] !== undefined && idxById[tgt] !== undefined) {
+      if (idxById[src] !== undefined && idxById[tgt] !== undefined)
         d3Links.push({ source: idxById[src], target: idxById[tgt] });
-      }
     });
+  }
 
-    const n      = d3Nodes.length;
-    const spread = Math.max(500, Math.sqrt(n) * 80);
+  // Create simulation in stopped state — we tick() manually.
+  const d3Sim = d3.forceSimulation(d3Nodes)
+    .force('link',    d3.forceLink(d3Links).distance(60).strength(0.4))
+    .force('charge',  d3.forceManyBody().strength(-120).theta(0.7))
+    .force('center',  d3.forceCenter(0, 0).strength(0.05))
+    .force('collide', d3.forceCollide(18))
+    .alphaDecay(0.015)
+    .velocityDecay(0.4)
+    .stop();  // IMPORTANT: never call .restart(); drive via tick()
 
-    const sim = d3.forceSimulation(d3Nodes)
-      .force('link',   d3.forceLink(d3Links).distance(60).strength(0.4))
-      .force('charge', d3.forceManyBody().strength(-120).theta(0.7))
-      .force('center', d3.forceCenter(0, 0).strength(0.05))
-      .force('collide', d3.forceCollide(18))
-      .alphaDecay(0.015)
-      .velocityDecay(0.4)
-      .stop();  // we drive it manually with requestAnimationFrame
+  function syncPositions() {
+    for (const dn of d3Nodes) {
+      graph.setNodeAttribute(dn.id, 'x', dn.x);
+      graph.setNodeAttribute(dn.id, 'y', dn.y);
+    }
+  }
 
-    // Sync d3 positions → graphology after every tick.
-    sim.on('tick', () => {
-      for (const dn of d3Nodes) {
-        graph.setNodeAttribute(dn.id, 'x', dn.x);
-        graph.setNodeAttribute(dn.id, 'y', dn.y);
-      }
-      renderer.refresh();
-    });
-
-    return sim;
+  function layoutFrame() {
+    if (!d3Running) return;
+    d3Sim.tick();
+    syncPositions();
+    renderer.refresh();
+    if (d3Sim.alpha() < d3Sim.alphaMin()) {
+      stopLayout();
+    } else {
+      d3RafId = requestAnimationFrame(layoutFrame);
+    }
   }
 
   function startLayout() {
     if (d3Running) return;
     d3Running = true;
+    d3Sim.alpha(0.5);   // reheat without .restart()
     btnLayout.textContent = '⏸ Stop';
     btnLayout.classList.add('active');
-
-    if (!d3Simulation) d3Simulation = buildD3Sim();
-    d3Simulation.alpha(0.5).restart();
-
-    function tick() {
-      if (!d3Running) return;
-      d3Simulation.tick();
-      if (d3Simulation.alpha() < d3Simulation.alphaMin()) {
-        stopLayout();
-        return;
-      }
-      requestAnimationFrame(tick);
-    }
-    requestAnimationFrame(tick);
+    d3RafId = requestAnimationFrame(layoutFrame);
   }
 
   function stopLayout() {
-    if (!d3Running) return;
     d3Running = false;
-    if (d3Simulation) d3Simulation.stop();
+    if (d3RafId) { cancelAnimationFrame(d3RafId); d3RafId = null; }
     btnLayout.textContent = '▶ Layout';
     btnLayout.classList.remove('active');
     rebuildLodCache();
@@ -390,19 +380,10 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   btnLayout.addEventListener('click', () => d3Running ? stopLayout() : startLayout());
 
-  // Run a quick initial layout (synchronous ticks, no animation).
+  // Quick synchronous pre-layout (no animation, no RAF).
   loadingText.textContent = 'Applying initial layout…';
-  {
-    const initSim = buildD3Sim();
-    const iters   = graph.order < 400 ? 300 : 100;
-    initSim.tick(iters);
-    // Sync final positions.
-    initSim.nodes().forEach(dn => {
-      graph.setNodeAttribute(dn.id, 'x', dn.x);
-      graph.setNodeAttribute(dn.id, 'y', dn.y);
-    });
-    d3Simulation = initSim;
-  }
+  d3Sim.tick(graph.order < 400 ? 300 : 80);
+  syncPositions();
   rebuildLodCache();
 
   // Hide loading overlay.
