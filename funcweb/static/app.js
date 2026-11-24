@@ -97,6 +97,18 @@ function computeSubtree(graph, nodeId) {
 }
 
 // ── Main bootstrap ───────────────────────────────────────────────────────────
+// Surface any uncaught errors during init into the loading overlay.
+window.addEventListener('error', ev => {
+  const el = document.getElementById('loading-text');
+  if (el) el.textContent = 'JS error: ' + (ev.message || ev) + ' (' + (ev.filename||'') + ':' + (ev.lineno||'') + ')';
+  console.error('uncaught error', ev);
+});
+window.addEventListener('unhandledrejection', ev => {
+  const el = document.getElementById('loading-text');
+  if (el) el.textContent = 'Promise error: ' + (ev.reason || ev);
+  console.error('unhandled rejection', ev.reason);
+});
+
 document.addEventListener('DOMContentLoaded', async () => {
 
   const loadingEl    = document.getElementById('loading');
@@ -120,6 +132,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   const searchInput  = document.getElementById('search');
   const searchResults= document.getElementById('search-results');
 
+  // Wrap entire init so any crash surfaces in the loading overlay.
+  try {
+
   // ── 1. Fetch graph data ────────────────────────────────────────────────
   loadingText.textContent = 'Loading graph…';
   let graphData;
@@ -128,7 +143,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (!res.ok) throw new Error(await res.text());
     graphData = await res.json();
   } catch (e) {
-    loadingText.textContent = 'Error: ' + e.message;
+    loadingText.textContent = 'Error loading graph: ' + e.message;
     return;
   }
 
@@ -686,5 +701,11 @@ document.addEventListener('DOMContentLoaded', async () => {
   // ── Utility ────────────────────────────────────────────────────────────
   function esc(s) {
     return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  } catch (e) {
+    // Any uncaught error during init shows up in the loading overlay.
+    loadingText.textContent = 'Init error: ' + e.message;
+    console.error('funcgraph init error', e);
   }
 });
