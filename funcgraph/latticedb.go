@@ -15,6 +15,7 @@ var (
 	bucketInIdx     = []byte("in_idx")      // to   → []from (callers index)
 	bucketScanMeta  = []byte("_scan_meta")  // scan progress metadata
 	bucketScanDone  = []byte("_scan_done")  // set of processed function names
+	bucketLayout    = []byte("_layout")     // nodeId → JSON Position
 )
 
 // scanStatus values stored in bucketScanMeta under key "status".
@@ -79,7 +80,7 @@ func (l *LatticeDB) initBuckets() error {
 	return l.db.Update(func(tx *bbolt.Tx) error {
 		for _, name := range [][]byte{
 			bucketNodes, bucketEdges, bucketOutIdx, bucketInIdx,
-			bucketScanMeta, bucketScanDone,
+			bucketScanMeta, bucketScanDone, bucketLayout,
 		} {
 			if _, err := tx.CreateBucketIfNotExists(name); err != nil {
 				return fmt.Errorf("funcgraph: create bucket %s: %w", name, err)

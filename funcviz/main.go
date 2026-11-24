@@ -199,6 +199,18 @@ func main() {
 		edges, _ := db.AllEdges()
 		log.Printf("done in %s — %d functions, %d edges",
 			time.Since(start).Round(time.Millisecond), len(fns), len(edges))
+
+		log.Printf("computing layout…")
+		layoutStart := time.Now()
+		if err := db.ComputeLayout(&funcgraph.LayoutOptions{
+			Progress: func(iter, total int) { progress("layout", iter, total) },
+		}); err != nil {
+			fmt.Println()
+			log.Printf("warning: layout failed: %v", err)
+		} else {
+			fmt.Println()
+			log.Printf("layout done in %s", time.Since(layoutStart).Round(time.Millisecond))
+		}
 	}
 
 	// ── Start web server ─────────────────────────────────────────────────

@@ -1,116 +1,234 @@
 /* ============================================================
    FuncGraph — vanilla JS graph visualiser
-   Depends on: graphology, sigma, d3-force, highlight.js
-               (all served from /vendor/ — no CDN required)
+   • d3-force layout (async, all nodes always in physics)
+   • Sigma WebGL renders only what's in the viewport natively
+   • Overlap resolver runs in background after sim cools
+   • Isolated nodes pinned in a grid to the right
    ============================================================ */
-
 'use strict';
 
-// ── Palette ─────────────────────────────────────────────────────────────────
-// Assign a stable colour to each unique file/language.
-const PALETTE = [
-  '#58a6ff','#3fb950','#f78166','#d2a8ff','#ffa657',
-  '#79c0ff','#56d364','#ff7b72','#bc8cff','#f0883e',
-  '#39d353','#ff6e6e','#b4aaff','#ffd700','#4fc3f7',
+// ── Palette ──────────────────────────────────────────────────────────────────
+// Fixed color per file extension — no red tones.
+const EXT_COLORS = {
+  '.go':    '#58a6ff',   // blue
+  '.py':    '#ffd700',   // yellow
+  '.js':    '#f0883e',   // orange
+  '.ts':    '#4fc3f7',   // light blue
+  '.tsx':   '#79c0ff',   // pale blue
+  '.rs':    '#ffa657',   // amber
+  '.rb':    '#bc8cff',   // purple
+  '.java':  '#56d364',   // green
+  '.kt':    '#8957e5',   // violet
+  '.cpp':   '#3fb950',   // bright green
+  '.cc':    '#3fb950',
+  '.cxx':   '#3fb950',
+  '.c':     '#85e89d',   // pale green
+  '.cs':    '#d2a8ff',   // lavender
+  '.scala': '#e3b341',   // gold
+  '.lua':   '#b4aaff',   // soft purple
+  '.php':   '#a5d6ff',   // sky blue
+  '.sh':    '#c8b1e4',   // mauve
+  '.bash':  '#c8b1e4',
+};
+const FALLBACK_PALETTE = [
+  '#58a6ff','#3fb950','#d2a8ff','#ffa657','#4fc3f7',
+  '#56d364','#bc8cff','#ffd700','#b4aaff','#f0883e',
 ];
 
 function fileColor(file) {
+  const dot = file.lastIndexOf('.');
+  const ext = dot >= 0 ? file.slice(dot).toLowerCase() : '';
+  if (EXT_COLORS[ext]) return EXT_COLORS[ext];
+  // Unknown extension: hash-based fallback (no red).
   let h = 0;
-  for (let i = 0; i < file.length; i++) h = (h * 31 + file.charCodeAt(i)) >>> 0;
-  return PALETTE[h % PALETTE.length];
+  for (let i = 0; i < ext.length; i++) h = (h * 31 + ext.charCodeAt(i)) >>> 0;
+  return FALLBACK_PALETTE[h % FALLBACK_PALETTE.length];
 }
 
-// ── Level-of-detail clustering ───────────────────────────────────────────────
-// When camera.ratio > LOD_THRESHOLD the viewport is very zoomed-out.
-// We merge spatially-close nodes into a single representative so the renderer
-// does not need to draw thousands of overlapping dots.
-const LOD_THRESHOLD = 0.6;    // camera ratio above which we start merging
-const LOD_CELL_PX   = 48;     // screen-pixels per merge cell (larger = more aggressive)
+// ── Module-level state ───────────────────────────────────────────────────────
+let RAW_NODES  = [];
+let RAW_EDGES  = [];
+let POSITIONS  = {};   // pre-computed layout from server: nodeId → {x, y}
+let NODE_BY_ID = new Map();
+let OUT_EDGES  = new Map();
+let IN_EDGES   = new Map();
+let IN_DEG     = new Map();
+let OUT_DEG    = new Map();
+let ISOLATED   = new Set();
 
-class LODManager {
-  constructor() {
-    this.hiddenNodes  = new Set();  // nodeId → hidden
-    this.clusterSize  = new Map();  // representativeId → count
-  }
+let d3Nodes = [];
+let d3Links = [];
+let nodeIdx = {};
+let sim     = null;
+let rafId   = null;
 
-  // Recompute which nodes are hidden based on current camera state.
-  // graphNodes: array of { id, x, y } in graph-space.
-  recompute(graphNodes, cameraRatio) {
-    this.hiddenNodes.clear();
-    this.clusterSize.clear();
+let graph    = null;
+let renderer = null;
 
-    if (cameraRatio < LOD_THRESHOLD) return;
+let hoveredNode    = null;
+let selectedNode   = null;
+let hoveredSubtree = null;
 
-    // The graph-space cell size that maps to LOD_CELL_PX screen pixels.
-    const cellSizeGraph = LOD_CELL_PX * cameraRatio;
+// ── Node size ─────────────────────────────────────────────────────────────────
+function nodeSize(id) {
+  const n    = RAW_NODES.length;
+  // Scale down as graph grows: 1.0 for ≤100 nodes, ~0.3 for 2000 nodes.
+  const scale = Math.max(0.25, 1 / Math.sqrt(n / 100));
+  const base  = (5 + Math.min(Math.log1p((IN_DEG.get(id)||0)+(OUT_DEG.get(id)||0)) * 2, 12));
+  return Math.max(2, base * scale);
+}
 
-    // Bucket nodes into cells; keep the highest-degree node per cell.
-    const cells = new Map();   // cellKey → { repId, repDegree, count }
-    for (const { id, x, y, degree } of graphNodes) {
-      const cx = Math.floor(x / cellSizeGraph);
-      const cy = Math.floor(y / cellSizeGraph);
-      const key = `${cx},${cy}`;
-      const existing = cells.get(key);
-      if (!existing || degree > existing.repDegree) {
-        if (existing) this.hiddenNodes.add(existing.repId); // demote old rep
-        cells.set(key, { repId: id, repDegree: degree, count: (existing ? existing.count : 0) + 1 });
-        if (existing) this.hiddenNodes.delete(id); // new rep is visible
-      } else {
-        this.hiddenNodes.add(id);
-        existing.count++;
-      }
+// ── Physics ───────────────────────────────────────────────────────────────────
+function buildPhysics() {
+  const oldPos = {};
+  for (const dn of d3Nodes) oldPos[dn.id] = { x: dn.x, y: dn.y, vx: dn.vx||0, vy: dn.vy||0 };
+
+  d3Nodes = [];
+  nodeIdx = {};
+  for (const n of RAW_NODES) {
+    const o   = oldPos[n.id];
+    const pre = POSITIONS[n.id];       // server-computed position
+    let x, y, vx = 0, vy = 0;
+    if (o) {
+      x = o.x; y = o.y; vx = o.vx; vy = o.vy;
+    } else if (pre) {
+      x = pre.x; y = pre.y;           // use backend layout directly
+    } else {
+      x = (Math.random()-.5)*700; y = (Math.random()-.5)*700;
     }
-    for (const { repId, count } of cells.values()) {
-      if (count > 1) this.clusterSize.set(repId, count);
+    d3Nodes.push({ id: n.id, x, y, vx, vy });
+    nodeIdx[n.id] = d3Nodes.length - 1;
+  }
+
+  d3Links = [];
+  for (const e of RAW_EDGES) {
+    const si = nodeIdx[e.from], ti = nodeIdx[e.to];
+    if (si !== undefined && ti !== undefined && e.from !== e.to)
+      d3Links.push({ source: si, target: ti });
+  }
+
+  const n      = d3Nodes.length;
+  const charge = -Math.max(400, n * 4);
+  const theta  = n > 800 ? 0.95 : n > 300 ? 0.9 : 0.8;
+
+  if (sim) sim.stop();
+  sim = d3.forceSimulation(d3Nodes)
+    .force('link',    d3.forceLink(d3Links).id((_,i)=>i).distance(80).strength(0.4))
+    .force('charge',  d3.forceManyBody().strength(charge).theta(theta))
+    .force('collide', d3.forceCollide(22).strength(1.0).iterations(4))
+    .force('center',  d3.forceCenter(0,0).strength(0.02))
+    .alphaDecay(0.008)
+    .velocityDecay(0.35)
+    .stop();
+
+  // Pin isolated nodes in a grid to the right of the main cluster.
+  const isolated = d3Nodes.filter(dn => ISOLATED.has(dn.id));
+  if (isolated.length) {
+    const nConn  = n - isolated.length;
+    const radius = Math.max(300, Math.sqrt(nConn+1) * 80);
+    const cols   = Math.max(1, Math.ceil(Math.sqrt(isolated.length)));
+    const step   = 28;
+    const oy     = -(Math.ceil(isolated.length/cols)*step)/2;
+    isolated.forEach((dn, i) => {
+      dn.fx = radius + 120 + (i%cols)*step;
+      dn.fy = oy + Math.floor(i/cols)*step;
+      dn.x  = dn.fx; dn.y = dn.fy;
+    });
+  }
+}
+
+// Sync physics positions → graphology so Sigma re-renders.
+function syncToGraph() {
+  if (!graph) return;
+  for (const dn of d3Nodes) {
+    if (graph.hasNode(dn.id)) {
+      graph.setNodeAttribute(dn.id, 'x', dn.x);
+      graph.setNodeAttribute(dn.id, 'y', dn.y);
     }
   }
 }
 
-// ── Hover / selection state ──────────────────────────────────────────────────
-let hoveredNode     = null;   // node id under mouse
-let selectedNode    = null;   // node id clicked
-let hoveredSubtree  = null;   // { nodes: Set, edges: Set }
-
-function computeSubtree(graph, nodeId) {
-  const nodes = new Set();
-  const edges = new Set();
-  const queue = [nodeId];
-  const visited = new Set([nodeId]);
-
-  while (queue.length) {
-    const cur = queue.shift();
-    nodes.add(cur);
-    // Outgoing (callees)
-    graph.outEdges(cur).forEach(eid => {
-      const tgt = graph.target(eid);
-      edges.add(eid);
-      if (!visited.has(tgt)) { visited.add(tgt); queue.push(tgt); }
-    });
-    // Incoming (callers)
-    graph.inEdges(cur).forEach(eid => {
-      const src = graph.source(eid);
-      edges.add(eid);
-      if (!visited.has(src)) { visited.add(src); queue.push(src); }
-    });
-  }
-  return { nodes, edges };
+function startSim(alpha = 0.8) {
+  if (!sim) return;
+  cancelAnimationFrame(rafId);
+  sim.alpha(alpha);
+  (function tick() {
+    sim.tick();
+    syncToGraph();
+    if (renderer) renderer.refresh();
+    if (sim.alpha() > sim.alphaMin()) {
+      rafId = requestAnimationFrame(tick);
+    }
+  })();
 }
 
-// ── Main bootstrap ───────────────────────────────────────────────────────────
-// Surface any uncaught errors during init into the loading overlay.
+
+// ── Add all nodes/edges to graphology ────────────────────────────────────────
+function populateGraph() {
+  if (!graph) return;
+  graph.clear();
+  for (const n of RAW_NODES) {
+    const dn = d3Nodes[nodeIdx[n.id]];
+    const iso = ISOLATED.has(n.id);
+    graph.addNode(n.id, {
+      label:      n.name,
+      x:          dn ? dn.x : 0,
+      y:          dn ? dn.y : 0,
+      size:       iso ? 4 : nodeSize(n.id),
+      color:      iso ? '#3a4455' : fileColor(n.file),
+      _file:      n.file,
+      _lang:      n.language,
+      _startLine: n.start_line,
+      _endLine:   n.end_line,
+      _isolated:  iso,
+    });
+  }
+  for (const e of RAW_EDGES) {
+    if (!graph.hasNode(e.from) || !graph.hasNode(e.to) || e.from===e.to) continue;
+    const eid = e.id || `${e.from}>${e.to}`;
+    if (!graph.hasEdge(eid))
+      graph.addEdgeWithKey(eid, e.from, e.to, {
+        color: 'rgba(100,120,145,0.5)', size: 1.2,
+      });
+  }
+}
+
+// Fit camera to show all nodes. Called after first render completes.
+function pointToSegmentDist(px, py, ax, ay, bx, by) {
+  const dx = bx-ax, dy = by-ay;
+  const lenSq = dx*dx + dy*dy;
+  if (lenSq === 0) return Math.hypot(px-ax, py-ay);
+  const t = Math.max(0, Math.min(1, ((px-ax)*dx + (py-ay)*dy) / lenSq));
+  return Math.hypot(px - (ax+t*dx), py - (ay+t*dy));
+}
+
+function fitCamera() {
+  if (!graph || !renderer || graph.order === 0) return;
+  // animatedReset fits all nodes — Sigma computes bounds internally.
+  renderer.getCamera().animatedReset();
+}
+
+function updateStatusBar(stNodes, stEdges, nodeCountEl) {
+  if (!graph) return;
+  let iso = 0;
+  graph.forEachNode((_,a)=>{ if(a._isolated) iso++; });
+  if (stNodes)    stNodes.textContent    = `nodes: ${graph.order-iso}${iso?' + '+iso+' iso':''}`;
+  if (stEdges)    stEdges.textContent    = `edges: ${graph.size}`;
+  if (nodeCountEl) nodeCountEl.textContent = `${RAW_NODES.length} total`;
+}
+
+// ── Error surfacing ───────────────────────────────────────────────────────────
 window.addEventListener('error', ev => {
   const el = document.getElementById('loading-text');
-  if (el) el.textContent = 'JS error: ' + (ev.message || ev) + ' (' + (ev.filename||'') + ':' + (ev.lineno||'') + ')';
-  console.error('uncaught error', ev);
+  if (el) el.textContent = 'JS error: ' + ev.message + ' (' + ev.lineno + ')';
 });
 window.addEventListener('unhandledrejection', ev => {
   const el = document.getElementById('loading-text');
-  if (el) el.textContent = 'Promise error: ' + (ev.reason || ev);
-  console.error('unhandled rejection', ev.reason);
+  if (el) el.textContent = 'Promise error: ' + (ev.reason||ev);
 });
 
+// ── Bootstrap ─────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
-
   const loadingEl    = document.getElementById('loading');
   const loadingText  = document.getElementById('loading-text');
   const sigmaEl      = document.getElementById('sigma-canvas');
@@ -132,636 +250,335 @@ document.addEventListener('DOMContentLoaded', async () => {
   const searchInput  = document.getElementById('search');
   const searchResults= document.getElementById('search-results');
 
-  // Wrap entire init so any crash surfaces in the loading overlay.
   try {
 
-  // ── 1. Fetch graph data ────────────────────────────────────────────────
+  // 1. Fetch ────────────────────────────────────────────────────────────
   loadingText.textContent = 'Loading graph…';
-  let graphData;
+  let raw;
   try {
     const res = await fetch('/api/graph');
     if (!res.ok) throw new Error(await res.text());
-    graphData = await res.json();
-  } catch (e) {
-    loadingText.textContent = 'Error loading graph: ' + e.message;
-    return;
+    raw = await res.json();
+  } catch(e) { loadingText.textContent='Error: '+e.message; return; }
+
+  RAW_NODES  = raw.nodes     || [];
+  RAW_EDGES  = raw.edges     || [];
+  POSITIONS  = raw.positions || {};
+  NODE_BY_ID = new Map(RAW_NODES.map(n=>[n.id,n]));
+
+  const connectedInRaw = new Set();
+  for (const e of RAW_EDGES) { connectedInRaw.add(e.from); connectedInRaw.add(e.to); }
+  ISOLATED = new Set(RAW_NODES.filter(n=>!connectedInRaw.has(n.id)).map(n=>n.id));
+
+  for (const e of RAW_EDGES) {
+    OUT_DEG.set(e.from,(OUT_DEG.get(e.from)||0)+1);
+    IN_DEG.set(e.to,  (IN_DEG.get(e.to)  ||0)+1);
+    if (!OUT_EDGES.has(e.from)) OUT_EDGES.set(e.from,[]);
+    OUT_EDGES.get(e.from).push(e);
+    if (!IN_EDGES.has(e.to)) IN_EDGES.set(e.to,[]);
+    IN_EDGES.get(e.to).push(e);
   }
 
-  const { nodes: rawNodes, edges: rawEdges } = graphData;
-
-  // ── 2. Build Graphology instance ───────────────────────────────────────
-  loadingText.textContent = 'Building graph…';
-  const graph = new graphology.Graph({ type: 'directed', multi: false });
-
-  // Map nodeId → { callerCount, calleeCount } to size nodes by degree.
-  const inDegree  = new Map();
-  const outDegree = new Map();
-  for (const e of (rawEdges || [])) {
-    outDegree.set(e.from, (outDegree.get(e.from) || 0) + 1);
-    inDegree.set(e.to,   (inDegree.get(e.to)   || 0) + 1);
-  }
-
-  // Assign deterministic initial positions grouped by file.
-  // Files get a slot on a circle; functions within a file spread around it.
-  const fileSlots = new Map(); // file → { cx, cy, count, angle }
-  for (const n of (rawNodes || [])) {
-    if (!fileSlots.has(n.file)) fileSlots.set(n.file, { count: 0 });
-    fileSlots.get(n.file).count++;
-  }
-  const fileList = [...fileSlots.keys()];
-  const nFiles   = fileList.length;
-  const outerR   = Math.max(400, nFiles * 60);
-  fileList.forEach((file, fi) => {
-    const angle = (fi / nFiles) * 2 * Math.PI;
-    const slot = fileSlots.get(file);
-    slot.cx    = outerR * Math.cos(angle);
-    slot.cy    = outerR * Math.sin(angle);
-    slot.angle = angle;
-    slot.idx   = 0;
-  });
-
-  for (const n of (rawNodes || [])) {
-    const slot = fileSlots.get(n.file);
-    const localR = Math.max(30, slot.count * 15 / (2 * Math.PI));
-    const localA = slot.angle + (slot.idx / slot.count) * 2 * Math.PI;
-    slot.idx++;
-    const deg = (inDegree.get(n.id) || 0) + (outDegree.get(n.id) || 0);
-    graph.addNode(n.id, {
-      label:     n.name,
-      x:         slot.cx + localR * Math.cos(localA),
-      y:         slot.cy + localR * Math.sin(localA),
-      size:      3 + Math.min(Math.log1p(deg) * 1.2, 8),
-      color:     fileColor(n.file),
-      // Store metadata for reducers / tooltips.
-      _file:      n.file,
-      _lang:      n.language,
-      _startLine: n.start_line,
-      _endLine:   n.end_line,
-      _in:        inDegree.get(n.id)  || 0,
-      _out:       outDegree.get(n.id) || 0,
-    });
-  }
-
-  for (const e of (rawEdges || [])) {
-    if (!graph.hasNode(e.from) || !graph.hasNode(e.to)) continue;
-    const eid = e.id || `${e.from}>${e.to}`;
-    if (!graph.hasEdge(eid)) {
-      graph.addEdgeWithKey(eid, e.from, e.to, {
-        color: 'rgba(80,100,120,0.35)',
-        size:  1,
-        _kind: e.kind,
-      });
-    }
-  }
-
-  nodeCountEl.textContent = `${graph.order} nodes · ${graph.size} edges`;
-  stNodes.textContent     = `nodes: ${graph.order}`;
-  stEdges.textContent     = `edges: ${graph.size}`;
-
-  // ── 3. Create Sigma renderer ───────────────────────────────────────────
+  // 2. Graphology + Sigma ───────────────────────────────────────────────
   loadingText.textContent = 'Rendering…';
+  graph = new graphology.Graph({ type:'directed', multi:false });
 
-  const lod = new LODManager();
-  let lodNodes = [];   // cached { id, x, y, degree } array rebuilt on layout stop
-
-  function rebuildLodCache() {
-    lodNodes = [];
-    graph.forEachNode((id, attrs) => {
-      lodNodes.push({ id, x: attrs.x, y: attrs.y, degree: graph.degree(id) });
-    });
-  }
-  rebuildLodCache();
-
-  // Declared with let so edgeReducer/nodeReducer can safely reference it
-  // before the assignment completes (renderer is undefined, not TDZ).
-  let renderer;
   renderer = new Sigma(graph, sigmaEl, {
-    renderEdgeLabels:     false,
-    defaultEdgeType:      'arrow',
-    defaultNodeColor:     '#58a6ff',
-    labelFont:            'system-ui, sans-serif',
-    labelSize:            12,
-    labelWeight:          '500',
-    labelColor:           { color: '#c9d1d9' },
-    minCameraRatio:       0.02,
-    maxCameraRatio:       20,
+    renderEdgeLabels:            false,
+    defaultEdgeType:             'arrow',
+    labelFont:                   'system-ui, sans-serif',
+    labelSize:                   13,
+    labelWeight:                 '500',
+    labelColor:                  { color:'#c9d1d9' },
+    labelRenderedSizeThreshold:  Infinity,  // labels hidden by default
+    minCameraRatio:              0.001,  // ~1000× zoom
+    maxCameraRatio:              15,
+    zIndexingRatio:              0.5,    // enables edge/node z-ordering
 
     nodeReducer: (node, data) => {
-      const result = { ...data };
-      const ratio  = renderer ? renderer.getCamera().ratio : 1;
+      const r = { ...data };
 
-      // LOD: hide nodes that were merged into a cluster representative.
-      if (lod.hiddenNodes.has(node)) {
-        result.hidden = true;
-        return result;
+      // Sigma renders size in graph-space — nodes grow as you zoom in.
+      // Multiply by ratio to fully cancel that growth: nodes stay the same
+      // screen-pixel size regardless of zoom level.
+      const ratio = renderer ? renderer.getCamera().ratio : 1;
+      r.size = Math.max(0.3, data.size * ratio * ratio * ratio);
+
+      // Show label only for hovered node and its subtree.
+      if (!hoveredSubtree || !hoveredSubtree.nodes.has(node)) {
+        r.label = '';
       }
 
-      // Scale node size inversely with zoom so nodes stay visually small
-      // when zoomed out and don't turn into giant blobs.
-      // At ratio=1 (normal): size unchanged.  ratio=4 (far out): size/2.
-      const zoomScale = 1 / Math.sqrt(Math.max(1, ratio));
-      result.size = Math.max(2, data.size * zoomScale);
-
-      // Cluster representative: show count, inflate slightly.
-      const cs = lod.clusterSize.get(node);
-      if (cs) {
-        result.size  = result.size + Math.log1p(cs) * 1.5;
-        result.label = `${data.label} (+${cs - 1})`;
-      }
-
-      // Hide labels when zoomed out — only show them when close enough.
-      // ratio < 0.5 means zoomed in (1px graph = >2px screen).
-      if (ratio > 0.45 && !cs) {
-        result.label = '';
-      }
-
-      // Hover dimming: dim everything not in the hovered subtree.
       if (hoveredNode && hoveredSubtree && !hoveredSubtree.nodes.has(node)) {
-        result.color = '#1e2a38';
-        result.label = '';
-        result.size  = Math.max(result.size * 0.5, 1.5);
-        return result;
+        r.color='rgba(150,160,180,0.25)'; return r;
       }
-
-      // Selected node: ring highlight.
-      if (node === selectedNode) {
-        result.highlighted = true;
-      }
-
-      // Hovered node itself: brighten.
-      if (node === hoveredNode) {
-        result.size  = result.size * 1.6;
-        result.color = '#ffffff';
-      }
-
-      return result;
+      if (node===selectedNode) r.highlighted=true;
+      if (node===hoveredNode)  { r.size*=1.6; r.color='#fff'; }
+      return r;
     },
 
     edgeReducer: (edge, data) => {
-      const result = { ...data };
-      // renderer is not yet assigned when Sigma calls this during construction,
-      // so we read the camera lazily via the sigma instance reference below.
-      const ratio  = renderer ? renderer.getCamera().ratio : 1;
-
-      // Fade edges when very zoomed out.
-      if (ratio > LOD_THRESHOLD * 2) {
-        result.hidden = true;
-        return result;
-      }
+      const r     = { ...data };
+      const ratio = renderer ? renderer.getCamera().ratio : 1;
+      const scale = Math.min(1, ratio * ratio * ratio);
 
       if (hoveredNode && hoveredSubtree) {
         if (hoveredSubtree.edges.has(edge)) {
-          const src = graph.source(edge);
-          result.color = src === hoveredNode ? '#58a6ff' : '#3fb950';
-          result.size  = 2;
+          // Callee edges (outgoing from selected): blue
+          // Caller edges (incoming to selected): orange
+          const isCaller = graph.target(edge) === hoveredNode;
+          r.color  = isCaller ? '#ffa657' : '#58a6ff';
+          r.size   = Math.max(0.2, 1.2 * scale);
+          r.zIndex = 9999;
         } else {
-          result.color = 'rgba(40,50,60,0.2)';
-          result.size  = 0.5;
+          r.color  = '#1a2530';
+          r.size   = Math.max(0.1, 0.3 * scale);
+          r.zIndex = 0;
         }
+      } else {
+        // Solid dark color — no transparency so edges don't accumulate into white blobs.
+        r.color = '#2a3a4a';
+        r.size  = Math.max(0.1, data.size * scale);
       }
-      return result;
+      return r;
     },
   });
 
-  // ── 4. LOD on camera move ──────────────────────────────────────────────
-  let lodDebounce = null;
-  renderer.getCamera().on('updated', state => {
-    stZoom.textContent = `zoom: ${(1 / state.ratio).toFixed(2)}`;
-
-    if (lodNodes.length > 0) {
-      clearTimeout(lodDebounce);
-      lodDebounce = setTimeout(() => {
-        lod.recompute(lodNodes, state.ratio);
-        renderer.refresh();
-      }, 60);
-    }
+  renderer.getCamera().on('updated', s => {
+    stZoom.textContent = `zoom: ${(1/s.ratio).toFixed(2)}`;
   });
 
-  // ── 5. Force-Atlas2 layout ─────────────────────────────────────────────
+  // 3. Physics + initial layout ─────────────────────────────────────────
   loadingText.textContent = 'Computing layout…';
+  buildPhysics();
 
-  // ── d3-force layout ───────────────────────────────────────────────────
-  // We drive d3-force manually with requestAnimationFrame (never call
-  // .restart() — that starts d3's internal timer which conflicts).
+  const hasServerLayout = Object.keys(POSITIONS).length > 0;
+  const pre = hasServerLayout ? 0
+    : RAW_NODES.length < 100 ? 300 : RAW_NODES.length < 300 ? 150
+    : RAW_NODES.length < 800 ? 80 : 40;
+  for (let i=0;i<pre;i++) sim.tick();
 
-  const btnLayout = document.getElementById('btn-layout');
-  let d3Running   = false;
-  let d3RafId     = null;
+  // All nodes go into graphology with their computed positions.
+  populateGraph();
+  updateStatusBar(stNodes, stEdges, nodeCountEl);
 
-  // Build d3 node/link arrays once; reuse across start/stop.
-  const d3Nodes = [];
-  const d3Links = [];
-  {
-    const idxById = {};
-    graph.forEachNode((id, attrs) => {
-      idxById[id] = d3Nodes.length;
-      d3Nodes.push({ id, x: attrs.x, y: attrs.y });
-    });
-    graph.forEachEdge((_, __, src, tgt) => {
-      if (idxById[src] !== undefined && idxById[tgt] !== undefined)
-        d3Links.push({ source: idxById[src], target: idxById[tgt] });
-    });
-  }
-
-  // Create simulation in stopped state — we tick() manually.
-  // Charge strength scales with node count so large graphs spread out more.
-  const chargeStrength = -Math.max(150, Math.min(600, graph.order * 1.2));
-  const linkDist       = Math.max(60, Math.min(200, 2000 / Math.sqrt(graph.order + 1)));
-
-  const d3Sim = d3.forceSimulation(d3Nodes)
-    .force('link',    d3.forceLink(d3Links).distance(linkDist).strength(0.3))
-    .force('charge',  d3.forceManyBody().strength(chargeStrength).theta(0.8))
-    .force('center',  d3.forceCenter(0, 0).strength(0.04))
-    .force('collide', d3.forceCollide(linkDist * 0.4).strength(0.7))
-    .alphaDecay(0.012)
-    .velocityDecay(0.35)
-    .stop();  // IMPORTANT: never call .restart(); drive via tick()
-
-  function syncPositions() {
-    for (const dn of d3Nodes) {
-      graph.setNodeAttribute(dn.id, 'x', dn.x);
-      graph.setNodeAttribute(dn.id, 'y', dn.y);
-    }
-  }
-
-  function layoutFrame() {
-    if (!d3Running) return;
-    d3Sim.tick();
-    syncPositions();
-    renderer.refresh();
-    if (d3Sim.alpha() < d3Sim.alphaMin()) {
-      stopLayout();
-    } else {
-      d3RafId = requestAnimationFrame(layoutFrame);
-    }
-  }
-
-  function startLayout() {
-    if (d3Running) return;
-    d3Running = true;
-    d3Sim.alpha(0.5);   // reheat without .restart()
-    btnLayout.textContent = '⏸ Stop';
-    btnLayout.classList.add('active');
-    d3RafId = requestAnimationFrame(layoutFrame);
-  }
-
-  function stopLayout() {
-    d3Running = false;
-    if (d3RafId) { cancelAnimationFrame(d3RafId); d3RafId = null; }
-    btnLayout.textContent = '▶ Layout';
-    btnLayout.classList.remove('active');
-    rebuildLodCache();
-    lod.recompute(lodNodes, renderer.getCamera().ratio);
-    renderer.refresh();
-  }
-
-  btnLayout.addEventListener('click', () => d3Running ? stopLayout() : startLayout());
-
-  // Quick synchronous pre-layout (no animation, no RAF).
-  loadingText.textContent = 'Applying initial layout…';
-  d3Sim.tick(graph.order < 200 ? 400 : graph.order < 800 ? 150 : 80);
-  syncPositions();
-  rebuildLodCache();
-
-  // Hide loading overlay.
   loadingEl.classList.add('hidden');
-  setTimeout(() => { loadingEl.style.display = 'none'; }, 450);
+  setTimeout(()=>{ loadingEl.style.display='none'; },400);
 
-  // ── 6. Fit to screen ──────────────────────────────────────────────────
-  document.getElementById('btn-fit').addEventListener('click', () => {
-    renderer.getCamera().animatedReset();
-  });
+  // Wait one frame so Sigma has rendered at least once, then fit.
+  requestAnimationFrame(() => fitCamera());
 
-  // ── 7. Hover interactions ─────────────────────────────────────────────
-  renderer.on('enterNode', ({ node, event }) => {
-    hoveredNode    = node;
-    hoveredSubtree = computeSubtree(graph, node);
-    renderer.refresh();
-
-    const attrs = graph.getNodeAttributes(node);
-    ttName.textContent  = attrs.label;
-    ttFile.textContent  = attrs._file;
-    ttStats.textContent = `callers: ${attrs._in}  callees: ${attrs._out}`;
-    tooltip.classList.add('visible');
-    moveTooltip(event);
-    stHover.textContent = attrs.label;
-  });
-
-  renderer.on('leaveNode', () => {
-    hoveredNode    = null;
-    hoveredSubtree = null;
-    renderer.refresh();
-    tooltip.classList.remove('visible');
-    stHover.textContent = '';
-  });
-
-  renderer.on('moveBody', ({ event }) => {
-    if (tooltip.classList.contains('visible')) moveTooltip(event);
-  });
-
-  function moveTooltip(event) {
-    const x = event.x + 14;
-    const y = event.y + 14;
-    tooltip.style.left = Math.min(x, window.innerWidth  - 290) + 'px';
-    tooltip.style.top  = Math.min(y, window.innerHeight - 90)  + 'px';
+  // 4. Hover ────────────────────────────────────────────────────────────
+  function computeSubtree(id) {
+    // Outgoing: full depth (all callees recursively).
+    const nodes=new Set([id]), edges=new Set(), q=[id], vis=new Set([id]);
+    while(q.length){
+      const cur=q.shift();
+      graph.outEdges(cur).forEach(eid=>{
+        const t=graph.target(eid); edges.add(eid);
+        if(!vis.has(t)){vis.add(t);nodes.add(t);q.push(t);}
+      });
+    }
+    // Incoming: depth 1 only (direct callers).
+    graph.inEdges(id).forEach(eid=>{
+      const s=graph.source(eid);
+      edges.add(eid); nodes.add(s);
+    });
+    return {nodes,edges};
   }
 
-  // ── 8. Click → open code panel ────────────────────────────────────────
-  renderer.on('clickNode', ({ node }) => {
-    selectedNode = node;
+  renderer.on('enterNode',({node,event})=>{
+    const a=graph.getNodeAttributes(node);
+    ttName.textContent =a.label;
+    ttFile.textContent =a._file;
+    ttStats.textContent=a._isolated
+      ?'no connections (isolated)'
+      :`callers: ${(IN_EDGES.get(node)||[]).length}  callees: ${(OUT_EDGES.get(node)||[]).length}`;
+    tooltip.classList.add('visible'); moveTooltip(event); stHover.textContent=a.label;
+  });
+
+  renderer.on('leaveNode',()=>{
+    tooltip.classList.remove('visible'); stHover.textContent='';
+  });
+
+  renderer.on('moveBody',({event})=>{
+    if(tooltip.classList.contains('visible')) moveTooltip(event);
+  });
+
+  function moveTooltip(e){
+    tooltip.style.left=Math.min(e.x+14,window.innerWidth -290)+'px';
+    tooltip.style.top =Math.min(e.y+14,window.innerHeight-90 )+'px';
+  }
+
+  // 5. Click ────────────────────────────────────────────────────────────
+  renderer.on('clickNode',({node})=>{
+    selectedNode=node;
+    hoveredNode=node;
+    hoveredSubtree=computeSubtree(node);
     renderer.refresh();
     openCodePanel(node);
   });
 
-  renderer.on('clickStage', () => {
-    selectedNode = null;
+  renderer.on('clickStage',()=>{
+    selectedNode=null; hoveredNode=null; hoveredSubtree=null;
     renderer.refresh();
   });
 
-  // ── 9. Code panel ─────────────────────────────────────────────────────
-  document.getElementById('panel-close').addEventListener('click', () => {
+  // 6. Toolbar ──────────────────────────────────────────────────────────
+  document.getElementById('btn-fit').addEventListener('click',()=>{
+    renderer.getCamera().animatedReset();
+  });
+  document.getElementById('btn-layout').addEventListener('click',()=>{
+    startSim(0.6);
+  });
+  document.getElementById('btn-show-all').addEventListener('click',()=>{
+    renderer.getCamera().animatedReset();
+  });
+
+  document.getElementById('btn-callers-only').addEventListener('click',function(){
+    if(!selectedNode)return;
+    this.classList.toggle('active');
+    document.getElementById('btn-callees-only').classList.remove('active');
+    focusSubtree(selectedNode,'callers');
+  });
+  document.getElementById('btn-callees-only').addEventListener('click',function(){
+    if(!selectedNode)return;
+    this.classList.toggle('active');
+    document.getElementById('btn-callers-only').classList.remove('active');
+    focusSubtree(selectedNode,'callees');
+  });
+
+  function focusSubtree(nodeId,dir){
+    const reach=new Set([nodeId]),q=[nodeId];
+    while(q.length){
+      const cur=q.shift();
+      for(const e of(dir==='callers'?(IN_EDGES.get(cur)||[]):(OUT_EDGES.get(cur)||[]))){
+        const nb=dir==='callers'?e.from:e.to;
+        if(!reach.has(nb)){reach.add(nb);q.push(nb);}
+      }
+    }
+    let minX=Infinity,maxX=-Infinity,minY=Infinity,maxY=-Infinity;
+    for(const id of reach){
+      const dn=d3Nodes[nodeIdx[id]]; if(!dn)continue;
+      if(dn.x<minX)minX=dn.x; if(dn.x>maxX)maxX=dn.x;
+      if(dn.y<minY)minY=dn.y; if(dn.y>maxY)maxY=dn.y;
+    }
+    if(!isFinite(minX))return;
+    const rect=sigmaEl.getBoundingClientRect();
+    const ratio=Math.max(0.05,Math.min(5,
+      Math.max((maxX-minX+100)/(rect.width*.8),(maxY-minY+100)/(rect.height*.8))));
+    renderer.getCamera().animate({x:(minX+maxX)/2,y:(minY+maxY)/2,ratio},{duration:500});
+  }
+
+  // 7. Code panel ───────────────────────────────────────────────────────
+  document.getElementById('panel-close').addEventListener('click',()=>{
     codePanel.classList.remove('open');
-    selectedNode = null;
+    selectedNode=null; hoveredNode=null; hoveredSubtree=null;
     renderer.refresh();
   });
 
-  async function openCodePanel(nodeId) {
-    const attrs = graph.getNodeAttributes(nodeId);
+  async function openCodePanel(nodeId){
+    const a=graph.getNodeAttributes(nodeId);
     codePanel.classList.add('open');
-
-    panelFnName.textContent   = attrs.label;
-    panelFilePath.textContent = attrs._file;
-
-    // Meta chips
-    panelMeta.innerHTML = `
-      <span class="meta-chip">lang: <b>${attrs._lang || '?'}</b></span>
-      <span class="meta-chip">lines: <b>${attrs._startLine}–${attrs._endLine}</b></span>
-      <span class="meta-chip">callers: <b>${attrs._in}</b></span>
-      <span class="meta-chip">callees: <b>${attrs._out}</b></span>
+    panelFnName.textContent   =a.label;
+    panelFilePath.textContent =a._file;
+    panelMeta.innerHTML=`
+      <span class="meta-chip">lang: <b>${a._lang||'?'}</b></span>
+      <span class="meta-chip">lines: <b>${a._startLine}–${a._endLine}</b></span>
+      <span class="meta-chip">callers: <b>${(IN_EDGES.get(nodeId)||[]).length}</b></span>
+      <span class="meta-chip">callees: <b>${(OUT_EDGES.get(nodeId)||[]).length}</b></span>
     `;
-
-    codeOutput.innerHTML = '<div class="code-loading">Loading…</div>';
-
-    let data;
-    try {
-      const res = await fetch(`/api/file?path=${encodeURIComponent(attrs._file)}`);
-      if (!res.ok) {
-        codeOutput.innerHTML = `<div class="code-loading">Could not load file: ${await res.text()}</div>`;
-        return;
-      }
-      data = await res.json();
-    } catch (e) {
-      codeOutput.innerHTML = `<div class="code-loading">Error: ${e.message}</div>`;
-      return;
-    }
-
-    renderCode(data.content, data.language, attrs._startLine, attrs._endLine);
+    codeOutput.innerHTML='<div class="code-loading">Loading…</div>';
+    try{
+      const res=await fetch(`/api/file?path=${encodeURIComponent(a._file)}`);
+      if(!res.ok){codeOutput.innerHTML='<div class="code-loading">Could not load.</div>';return;}
+      const data=await res.json();
+      renderCode(data.content,data.language,a._startLine,a._endLine);
+    }catch(e){codeOutput.innerHTML=`<div class="code-loading">Error: ${e.message}</div>`;}
   }
 
-  function renderCode(content, language, fnStart, fnEnd) {
-    // Run highlight.js on the full file content.
-    let highlighted;
-    try {
-      highlighted = hljs.highlight(content, { language, ignoreIllegals: true }).value;
-    } catch (_) {
-      highlighted = hljs.highlightAuto(content).value;
-    }
-
-    // Split highlighted HTML into lines, preserving open <span> tags
-    // across line breaks so the colouring never breaks.
-    const lines = splitHighlightedLines(highlighted);
-
-    const rows = lines.map((lineHtml, i) => {
-      const lineNo = i + 1;
-      const isFn   = lineNo >= fnStart && lineNo <= fnEnd;
-      let cls = 'code-row';
-      if (isFn) {
-        cls += ' fn-line';
-        if (lineNo === fnStart) cls += ' fn-line-start';
-        if (lineNo === fnEnd)   cls += ' fn-line-end';
-      }
-      return `<div class="${cls}" data-line="${lineNo}">` +
-             `<span class="line-num">${lineNo}</span>` +
-             `<span class="line-code">${lineHtml || ' '}</span>` +
-             `</div>`;
-    });
-
-    codeOutput.innerHTML = `<div class="code-table">${rows.join('')}</div>`;
-
-    // Scroll to the first function line.
-    const target = codeOutput.querySelector('.fn-line-start');
-    if (target) {
-      requestAnimationFrame(() => {
-        const scrollTop = target.offsetTop - codeScroll.clientHeight * 0.3;
-        codeScroll.scrollTop = Math.max(0, scrollTop);
-      });
-    }
+  function renderCode(content,language,fnStart,fnEnd){
+    let hl;
+    try{hl=hljs.highlight(content,{language,ignoreIllegals:true}).value;}
+    catch(_){hl=hljs.highlightAuto(content).value;}
+    const lines=splitLines(hl);
+    codeOutput.innerHTML='<div class="code-table">'+lines.map((lh,i)=>{
+      const n=i+1,fn=n>=fnStart&&n<=fnEnd;
+      let cls='code-row'+(fn?' fn-line':'');
+      if(n===fnStart)cls+=' fn-line-start';
+      if(n===fnEnd)  cls+=' fn-line-end';
+      return `<div class="${cls}"><span class="line-num">${n}</span><span class="line-code">${lh||' '}</span></div>`;
+    }).join('')+'</div>';
+    const t=codeOutput.querySelector('.fn-line-start');
+    if(t)requestAnimationFrame(()=>{codeScroll.scrollTop=Math.max(0,t.offsetTop-codeScroll.clientHeight*.3);});
   }
 
-  // ── 10. Split highlighted HTML into per-line arrays ────────────────────
-  // This parser re-opens any unclosed <span> tags on the next line so
-  // multi-line strings / comments stay properly coloured.
-  function splitHighlightedLines(html) {
-    const lines = [];
-    let current = '';
-    let openTags = [];   // stack of open span class-stacks
-    let i = 0;
-
-    while (i < html.length) {
-      if (html[i] === '\n') {
-        lines.push(current);
-        // Re-open any unclosed spans on next line.
-        current = openTags.map(t => `<span class="${t}">`).join('');
-        i++;
-        continue;
+  function splitLines(html){
+    const out=[]; let cur='',tags=[],i=0;
+    while(i<html.length){
+      if(html[i]==='\n'){out.push(cur);cur=tags.map(t=>`<span class="${t}">`).join('');i++;continue;}
+      if(html[i]==='<'){
+        const end=html.indexOf('>',i);if(end<0){cur+=html[i++];continue;}
+        const tag=html.slice(i,end+1);
+        if(tag.startsWith('<span')){const m=tag.match(/class="([^"]*)"/);if(m)tags.push(m[1]);}
+        else if(tag==='</span>')tags.pop();
+        cur+=tag;i=end+1;continue;
       }
-      if (html[i] === '<') {
-        const tagEnd = html.indexOf('>', i);
-        if (tagEnd === -1) { current += html[i++]; continue; }
-        const tag = html.slice(i, tagEnd + 1);
-        if (tag.startsWith('<span')) {
-          const m = tag.match(/class="([^"]*)"/);
-          if (m) openTags.push(m[1]);
-        } else if (tag === '</span>') {
-          openTags.pop();
-        }
-        current += tag;
-        i = tagEnd + 1;
-        continue;
-      }
-      current += html[i++];
+      cur+=html[i++];
     }
-    if (current) lines.push(current);
-
-    // Close any open spans on the last pushed line.
-    if (lines.length && openTags.length) {
-      lines[lines.length - 1] += '</span>'.repeat(openTags.length);
-    }
-    return lines;
+    if(cur)out.push(cur);
+    if(out.length&&tags.length)out[out.length-1]+='</span>'.repeat(tags.length);
+    return out;
   }
 
-  // ── 11. Search ─────────────────────────────────────────────────────────
-  searchInput.addEventListener('input', () => {
-    const q = searchInput.value.trim().toLowerCase();
-    if (!q) { searchResults.classList.remove('open'); return; }
-
-    const matches = [];
-    graph.forEachNode((id, attrs) => {
-      if (attrs.label.toLowerCase().includes(q) || attrs._file.toLowerCase().includes(q)) {
-        matches.push({ id, label: attrs.label, file: attrs._file });
-      }
-    });
-
-    if (!matches.length) { searchResults.classList.remove('open'); return; }
-
-    searchResults.innerHTML = matches.slice(0, 20).map(m =>
-      `<div class="sr-item" data-id="${m.id}">
-        <div class="sr-name">${esc(m.label)}</div>
-        <div class="sr-file">${esc(m.file)}</div>
-      </div>`
+  // 8. Search ───────────────────────────────────────────────────────────
+  searchInput.addEventListener('input',()=>{
+    const q=searchInput.value.trim().toLowerCase();
+    if(!q){searchResults.classList.remove('open');return;}
+    const matches=RAW_NODES.filter(n=>n.name.toLowerCase().includes(q)||n.file.toLowerCase().includes(q)).slice(0,20);
+    if(!matches.length){searchResults.classList.remove('open');return;}
+    searchResults.innerHTML=matches.map(m=>
+      `<div class="sr-item" data-id="${m.id}"><div class="sr-name">${esc(m.name)}</div><div class="sr-file">${esc(m.file)}</div></div>`
     ).join('');
     searchResults.classList.add('open');
   });
 
-  searchResults.addEventListener('click', e => {
-    const item = e.target.closest('.sr-item');
-    if (!item) return;
-    const id = item.dataset.id;
-    searchResults.classList.remove('open');
-    searchInput.value = '';
-    navigateTo(id);
+  searchResults.addEventListener('click',e=>{
+    const item=e.target.closest('.sr-item');
+    if(!item)return;
+    searchResults.classList.remove('open'); searchInput.value='';
+    const id=item.dataset.id;
+    const dn=d3Nodes[nodeIdx[id]];
+    if(dn) renderer.getCamera().animate({x:dn.x,y:dn.y,ratio:0.5},{duration:400});
+    selectedNode=id; renderer.refresh();
+    if(graph.hasNode(id)) openCodePanel(id);
   });
 
-  document.addEventListener('click', e => {
-    if (!searchResults.contains(e.target) && e.target !== searchInput) {
+  document.addEventListener('click',e=>{
+    if(!searchResults.contains(e.target)&&e.target!==searchInput)
       searchResults.classList.remove('open');
-    }
   });
 
-  function navigateTo(nodeId) {
-    const attrs = graph.getNodeAttributes(nodeId);
-    renderer.getCamera().animate(
-      { x: attrs.x, y: attrs.y, ratio: 0.3 },
-      { duration: 500 }
-    );
-    selectedNode = nodeId;
-    renderer.refresh();
-    openCodePanel(nodeId);
-  }
-
-  // ── 12. Direction filters ──────────────────────────────────────────────
-  // These buttons highlight only the upstream or downstream sub-tree of
-  // the currently selected node.
-  function computeDirectionalSubtree(nodeId, direction) {
-    if (!nodeId) return null;
-    const nodes = new Set([nodeId]);
-    const edges = new Set();
-    const queue = [nodeId];
-    const visited = new Set([nodeId]);
-
-    while (queue.length) {
-      const cur = queue.shift();
-      const edgeIter = direction === 'callers'
-        ? graph.inEdges(cur)
-        : graph.outEdges(cur);
-      edgeIter.forEach(eid => {
-        const neighbor = direction === 'callers' ? graph.source(eid) : graph.target(eid);
-        edges.add(eid);
-        nodes.add(neighbor);
-        if (!visited.has(neighbor)) { visited.add(neighbor); queue.push(neighbor); }
-      });
-    }
-    return { nodes, edges };
-  }
-
-  let directionFilter = null;  // 'callers' | 'callees' | null
-
-  document.getElementById('btn-callers-only').addEventListener('click', function() {
-    if (directionFilter === 'callers') {
-      directionFilter = null;
-      this.classList.remove('active');
-    } else {
-      directionFilter = 'callers';
-      this.classList.add('active');
-      document.getElementById('btn-callees-only').classList.remove('active');
-    }
-    applyDirectionFilter();
+  // 9. Panel resize ─────────────────────────────────────────────────────
+  const rh=document.getElementById('panel-resize');
+  let resizing=false,rx=0,rw=0;
+  rh.addEventListener('mousedown',e=>{
+    e.preventDefault();resizing=true;rx=e.clientX;rw=codePanel.offsetWidth;
+    rh.classList.add('dragging');document.body.style.cssText='cursor:ew-resize;user-select:none';
+  });
+  document.addEventListener('mousemove',e=>{
+    if(!resizing)return;
+    const min=parseInt(getComputedStyle(codePanel).minWidth)||260;
+    codePanel.style.width=Math.min(Math.round(window.innerWidth*.9),Math.max(min,rw+rx-e.clientX))+'px';
+  });
+  document.addEventListener('mouseup',()=>{
+    if(!resizing)return;resizing=false;rh.classList.remove('dragging');document.body.style.cssText='';
   });
 
-  document.getElementById('btn-callees-only').addEventListener('click', function() {
-    if (directionFilter === 'callees') {
-      directionFilter = null;
-      this.classList.remove('active');
-    } else {
-      directionFilter = 'callees';
-      this.classList.add('active');
-      document.getElementById('btn-callers-only').classList.remove('active');
-    }
-    applyDirectionFilter();
-  });
+  function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 
-  function applyDirectionFilter() {
-    if (!directionFilter || !selectedNode) {
-      graph.forEachNode(id => graph.setNodeAttribute(id, '_filtered', false));
-    } else {
-      const sub = computeDirectionalSubtree(selectedNode, directionFilter);
-      graph.forEachNode(id => graph.setNodeAttribute(id, '_filtered', !sub.nodes.has(id)));
-    }
-    renderer.refresh();
-  }
-
-  // Integrate _filtered into nodeReducer (patch done below).
-  const origNodeReducer = renderer.settings.nodeReducer;
-  renderer.setSetting('nodeReducer', (node, data) => {
-    const result = origNodeReducer(node, data);
-    if (graph.getNodeAttribute(node, '_filtered')) {
-      result.hidden = true;
-    }
-    return result;
-  });
-
-  // ── Panel resize ───────────────────────────────────────────────────────
-  const resizeHandle = document.getElementById('panel-resize');
-  let resizing = false;
-  let resizeStartX = 0;
-  let resizeStartW = 0;
-
-  resizeHandle.addEventListener('mousedown', e => {
-    e.preventDefault();
-    resizing    = true;
-    resizeStartX = e.clientX;
-    resizeStartW = codePanel.offsetWidth;
-    resizeHandle.classList.add('dragging');
-    document.body.style.cursor    = 'ew-resize';
-    document.body.style.userSelect = 'none';
-  });
-
-  document.addEventListener('mousemove', e => {
-    if (!resizing) return;
-    // Panel is on the right; dragging left = wider, right = narrower.
-    const delta   = resizeStartX - e.clientX;
-    const minW    = parseInt(getComputedStyle(codePanel).minWidth) || 260;
-    const maxW    = Math.round(window.innerWidth * 0.9);
-    const newW    = Math.min(maxW, Math.max(minW, resizeStartW + delta));
-    codePanel.style.width = newW + 'px';
-  });
-
-  document.addEventListener('mouseup', () => {
-    if (!resizing) return;
-    resizing = false;
-    resizeHandle.classList.remove('dragging');
-    document.body.style.cursor     = '';
-    document.body.style.userSelect = '';
-  });
-
-  // ── Utility ────────────────────────────────────────────────────────────
-  function esc(s) {
-    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-  }
-
-  } catch (e) {
-    // Any uncaught error during init shows up in the loading overlay.
-    loadingText.textContent = 'Init error: ' + e.message;
-    console.error('funcgraph init error', e);
+  }catch(e){
+    loadingText.textContent='Init error: '+e.message;
+    console.error(e);
   }
 });

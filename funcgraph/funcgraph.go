@@ -63,3 +63,21 @@ type Subgraph struct {
 	Nodes []FuncNode
 	Edges []Edge
 }
+
+// Position is a 2-D coordinate for a graph node.
+type Position struct {
+	X float64 `json:"x"`
+	Y float64 `json:"y"`
+}
+
+// LayoutOptions controls the Fruchterman-Reingold layout algorithm.
+// A nil value uses sensible defaults.
+type LayoutOptions struct {
+	// Iterations to run. 0 → auto (scales with node count).
+	Iterations int
+	// NodeRadius is the minimum half-gap between node centres (pixels).
+	// 0 → 20.
+	NodeRadius float64
+	// Progress is called after every 10 iterations. May be nil.
+	Progress func(iter, total int)
+}

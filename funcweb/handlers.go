@@ -24,8 +24,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/file", s.handleFile)
 }
 
-// handleGraph returns all nodes and edges as a single JSON object.
-// For very large graphs clients should use /api/subgraph for incremental loading.
+// handleGraph returns all nodes, edges, and pre-computed layout positions.
 func (s *Server) handleGraph(w http.ResponseWriter, r *http.Request) {
 	nodes, err := s.cfg.DB.Functions()
 	if err != nil {
@@ -37,12 +36,18 @@ func (s *Server) handleGraph(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, err, http.StatusInternalServerError)
 		return
 	}
+	positions, err := s.cfg.DB.GetLayout()
+	if err != nil {
+		httpErr(w, err, http.StatusInternalServerError)
+		return
+	}
 
 	type resp struct {
-		Nodes []funcgraph.FuncNode `json:"nodes"`
-		Edges []funcgraph.Edge     `json:"edges"`
+		Nodes     []funcgraph.FuncNode              `json:"nodes"`
+		Edges     []funcgraph.Edge                   `json:"edges"`
+		Positions map[string]funcgraph.Position      `json:"positions,omitempty"`
 	}
-	writeJSON(w, resp{Nodes: nodes, Edges: edges})
+	writeJSON(w, resp{Nodes: nodes, Edges: edges, Positions: positions})
 }
 
 // handleSubgraph returns the neighbourhood of a node.
