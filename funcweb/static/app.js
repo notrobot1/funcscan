@@ -539,25 +539,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     renderSavedUI();
 
     try {
-      const nx  = graph.getNodeAttribute(id, 'x');
-      const ny  = graph.getNodeAttribute(id, 'y');
+      // getNodeDisplayData returns coordinates in Sigma's internal normalized space —
+      // the same space camera.x/y live in. No manual normalization needed.
+      const display = renderer.getNodeDisplayData(id);
+      if (!display) return;
       const cam = renderer.getCamera();
-
-      // Sigma normalizes positions by the graph bounding box:
-      // normCoord = (raw - min) / max(rangeX, rangeY)
-      // Camera x/y live in this same normalized space.
-      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-      graph.forEachNode((_, a) => {
-        if (a.x < minX) minX = a.x; if (a.x > maxX) maxX = a.x;
-        if (a.y < minY) minY = a.y; if (a.y > maxY) maxY = a.y;
-      });
-      const maxDim = Math.max(maxX - minX, maxY - minY) || 1;
-      const normX  = (nx - minX) / maxDim;
-      const normY  = 1 - (ny - minY) / maxDim;  // Sigma flips Y axis
-      // Use a fixed comfortable zoom so the node is always visible.
-      // If currently zoomed out more than 0.3, keep current zoom; otherwise zoom to 0.3.
-      const targetRatio = Math.min(cam.getState().ratio, 0.3);
-      cam.animate({ x: normX, y: normY, ratio: targetRatio }, { duration: 500 });
+      cam.animate(
+        { x: display.x, y: display.y, ratio: cam.getState().ratio },
+        { duration: 500 }
+      );
     } catch(e) { console.error('navigate error', e); }
   }
 
