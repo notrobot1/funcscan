@@ -24,8 +24,8 @@ function fileColor(file) {
 // When camera.ratio > LOD_THRESHOLD the viewport is very zoomed-out.
 // We merge spatially-close nodes into a single representative so the renderer
 // does not need to draw thousands of overlapping dots.
-const LOD_THRESHOLD = 1.5;    // camera ratio above which we start merging
-const LOD_CELL_PX   = 24;     // screen-pixels per merge cell
+const LOD_THRESHOLD = 0.6;    // camera ratio above which we start merging
+const LOD_CELL_PX   = 48;     // screen-pixels per merge cell (larger = more aggressive)
 
 class LODManager {
   constructor() {
@@ -190,7 +190,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       label:     n.name,
       x:         slot.cx + localR * Math.cos(localA),
       y:         slot.cy + localR * Math.sin(localA),
-      size:      4 + Math.min(Math.log1p(deg) * 2.5, 18),
+      size:      3 + Math.min(Math.log1p(deg) * 1.2, 8),
       color:     fileColor(n.file),
       // Store metadata for reducers / tooltips.
       _file:      n.file,
@@ -248,36 +248,49 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     nodeReducer: (node, data) => {
       const result = { ...data };
+      const ratio  = renderer ? renderer.getCamera().ratio : 1;
 
-      // LOD: hide clustered-away nodes.
+      // LOD: hide nodes that were merged into a cluster representative.
       if (lod.hiddenNodes.has(node)) {
         result.hidden = true;
         return result;
       }
 
-      // Cluster representative: inflate size, append count.
+      // Scale node size inversely with zoom so nodes stay visually small
+      // when zoomed out and don't turn into giant blobs.
+      // At ratio=1 (normal): size unchanged.  ratio=4 (far out): size/2.
+      const zoomScale = 1 / Math.sqrt(Math.max(1, ratio));
+      result.size = Math.max(2, data.size * zoomScale);
+
+      // Cluster representative: show count, inflate slightly.
       const cs = lod.clusterSize.get(node);
       if (cs) {
-        result.size  = data.size + Math.log1p(cs) * 2;
+        result.size  = result.size + Math.log1p(cs) * 1.5;
         result.label = `${data.label} (+${cs - 1})`;
+      }
+
+      // Hide labels when zoomed out — only show them when close enough.
+      // ratio < 0.5 means zoomed in (1px graph = >2px screen).
+      if (ratio > 0.45 && !cs) {
+        result.label = '';
       }
 
       // Hover dimming: dim everything not in the hovered subtree.
       if (hoveredNode && hoveredSubtree && !hoveredSubtree.nodes.has(node)) {
-        result.color = '#2a3140';
+        result.color = '#1e2a38';
         result.label = '';
-        result.size  = Math.max(result.size * 0.6, 2);
+        result.size  = Math.max(result.size * 0.5, 1.5);
         return result;
       }
 
-      // Selected node: highlight with ring.
+      // Selected node: ring highlight.
       if (node === selectedNode) {
         result.highlighted = true;
       }
 
-      // Hover: brighten the hovered node itself.
+      // Hovered node itself: brighten.
       if (node === hoveredNode) {
-        result.size  = data.size * 1.4;
+        result.size  = result.size * 1.6;
         result.color = '#ffffff';
       }
 
@@ -351,13 +364,17 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   // Create simulation in stopped state — we tick() manually.
+  // Charge strength scales with node count so large graphs spread out more.
+  const chargeStrength = -Math.max(150, Math.min(600, graph.order * 1.2));
+  const linkDist       = Math.max(60, Math.min(200, 2000 / Math.sqrt(graph.order + 1)));
+
   const d3Sim = d3.forceSimulation(d3Nodes)
-    .force('link',    d3.forceLink(d3Links).distance(60).strength(0.4))
-    .force('charge',  d3.forceManyBody().strength(-120).theta(0.7))
-    .force('center',  d3.forceCenter(0, 0).strength(0.05))
-    .force('collide', d3.forceCollide(18))
-    .alphaDecay(0.015)
-    .velocityDecay(0.4)
+    .force('link',    d3.forceLink(d3Links).distance(linkDist).strength(0.3))
+    .force('charge',  d3.forceManyBody().strength(chargeStrength).theta(0.8))
+    .force('center',  d3.forceCenter(0, 0).strength(0.04))
+    .force('collide', d3.forceCollide(linkDist * 0.4).strength(0.7))
+    .alphaDecay(0.012)
+    .velocityDecay(0.35)
     .stop();  // IMPORTANT: never call .restart(); drive via tick()
 
   function syncPositions() {
@@ -402,7 +419,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // Quick synchronous pre-layout (no animation, no RAF).
   loadingText.textContent = 'Applying initial layout…';
-  d3Sim.tick(graph.order < 400 ? 300 : 80);
+  d3Sim.tick(graph.order < 200 ? 400 : graph.order < 800 ? 150 : 80);
   syncPositions();
   rebuildLodCache();
 
