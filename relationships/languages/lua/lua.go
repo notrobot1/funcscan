@@ -5,7 +5,7 @@ import (
 	tree_sitter_lua "github.com/tree-sitter-grammars/tree-sitter-lua/bindings/go"
 	sitter "github.com/tree-sitter/go-tree-sitter"
 
-	"github.com/notrobot1/funcscan/lang"
+	"github.com/notrobot1/funcscan/relationships/lang"
 )
 
 // lastIdent returns the final identifier of `a`, `a.b.c` or `a:b`.
