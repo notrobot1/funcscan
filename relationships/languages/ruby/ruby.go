@@ -7,7 +7,7 @@ import (
 	sitter "github.com/tree-sitter/go-tree-sitter"
 	tree_sitter_ruby "github.com/tree-sitter/tree-sitter-ruby/bindings/go"
 
-	"github.com/notrobot1/funcscan/lang"
+	"github.com/notrobot1/funcscan/relationships/lang"
 )
 
 // Spec returns the Ruby language description.
