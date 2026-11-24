@@ -5,7 +5,7 @@ import (
 	sitter "github.com/tree-sitter/go-tree-sitter"
 	tree_sitter_c "github.com/tree-sitter/tree-sitter-c/bindings/go"
 
-	"github.com/notrobot1/funcscan/lang"
+	"github.com/notrobot1/funcscan/relationships/lang"
 )
 
 // funcName unwraps the declarator chain of a function_definition:
