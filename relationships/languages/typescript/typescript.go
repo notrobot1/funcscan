@@ -7,8 +7,8 @@ import (
 	sitter "github.com/tree-sitter/go-tree-sitter"
 	tree_sitter_typescript "github.com/tree-sitter/tree-sitter-typescript/bindings/go"
 
-	"github.com/notrobot1/funcscan/lang"
-	"github.com/notrobot1/funcscan/languages/javascript"
+	"github.com/notrobot1/funcscan/relationships/lang"
+	"github.com/notrobot1/funcscan/relationships/languages/javascript"
 )
 
 func funcName(n *sitter.Node, src []byte) *sitter.Node {
