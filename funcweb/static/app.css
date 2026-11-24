@@ -191,6 +191,7 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); color: var(-
   font-size: 12.5px;
   line-height: 1.6;
   white-space: pre;
+  text-align: left;
 }
 
 .code-row {
