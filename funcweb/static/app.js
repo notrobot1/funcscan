@@ -331,12 +331,9 @@ document.addEventListener('DOMContentLoaded', async () => {
           r.size   = Math.max(0.2, 1.2 * scale);
           r.zIndex = 9999;
         } else {
-          r.color  = '#1a2530';
-          r.size   = Math.max(0.1, 0.3 * scale);
-          r.zIndex = 0;
+          r.hidden = true;
         }
       } else {
-        // Solid dark color — no transparency so edges don't accumulate into white blobs.
         r.color = '#2a3a4a';
         r.size  = Math.max(0.1, data.size * scale);
       }
@@ -557,6 +554,61 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.addEventListener('click',e=>{
     if(!searchResults.contains(e.target)&&e.target!==searchInput)
       searchResults.classList.remove('open');
+  });
+
+  // 8b. Node dragging ───────────────────────────────────────────────────
+  // We use a transparent overlay div that sits on top of the sigma canvas
+  // during drag — this fully intercepts mouse events so Sigma never sees
+  // the mousemove and therefore cannot pan the camera.
+
+  let dragNode    = null;
+  let dragLastPos = null;
+
+  // Capture phase — runs BEFORE Sigma's own mousedown handler.
+  // If the click is on the selected node, block Sigma from starting a camera pan.
+  sigmaEl.addEventListener('mousedown', e => {
+    if (!selectedNode) return;
+    try {
+      const screen = renderer.graphToViewport({
+        x: graph.getNodeAttribute(selectedNode, 'x'),
+        y: graph.getNodeAttribute(selectedNode, 'y'),
+      });
+      const dist = Math.hypot(e.offsetX - screen.x, e.offsetY - screen.y);
+      const size = graph.getNodeAttribute(selectedNode, 'size') || 8;
+      if (dist > size * 3 + 10) return;
+    } catch(_) { return; }
+
+    e.stopImmediatePropagation(); // prevents Sigma from registering camera drag
+    dragNode    = selectedNode;
+    dragLastPos = { x: e.offsetX, y: e.offsetY };
+    document.body.style.cursor = 'grabbing';
+  }, true /* capture */);
+
+  document.addEventListener('mousemove', e => {
+    if (!dragNode || !dragLastPos) return;
+    const rect = sigmaEl.getBoundingClientRect();
+    const cur  = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    try {
+      const p1 = renderer.viewportToGraph(dragLastPos);
+      const p2 = renderer.viewportToGraph(cur);
+      const nx = graph.getNodeAttribute(dragNode, 'x') + (p2.x - p1.x);
+      const ny = graph.getNodeAttribute(dragNode, 'y') + (p2.y - p1.y);
+      graph.setNodeAttribute(dragNode, 'x', nx);
+      graph.setNodeAttribute(dragNode, 'y', ny);
+      const idx = nodeIdx[dragNode];
+      if (idx !== undefined) {
+        d3Nodes[idx].x = d3Nodes[idx].fx = nx;
+        d3Nodes[idx].y = d3Nodes[idx].fy = ny;
+      }
+      renderer.refresh();
+    } catch(_) {}
+    dragLastPos = cur;
+  });
+
+  document.addEventListener('mouseup', () => {
+    if (!dragNode) return;
+    dragNode = null; dragLastPos = null;
+    document.body.style.cursor = '';
   });
 
   // 9. Panel resize ─────────────────────────────────────────────────────
