@@ -310,7 +310,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
 
       if (hoveredNode && hoveredSubtree && !hoveredSubtree.nodes.has(node)) {
-        r.color='rgba(150,160,180,0.25)'; return r;
+        r.color='#1e2a35'; return r;
       }
       if (node===selectedNode) r.highlighted=true;
       if (node===hoveredNode)  { r.size*=1.6; r.color='#fff'; }
@@ -548,10 +548,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     if(!item)return;
     searchResults.classList.remove('open'); searchInput.value='';
     const id=item.dataset.id;
-    const dn=d3Nodes[nodeIdx[id]];
-    if(dn) renderer.getCamera().animate({x:dn.x,y:dn.y,ratio:0.5},{duration:400});
-    selectedNode=id; renderer.refresh();
-    if(graph.hasNode(id)) openCodePanel(id);
+    if(!graph.hasNode(id)) return;
+    selectedNode=id; hoveredNode=id; hoveredSubtree=computeSubtree(id);
+    renderer.refresh();
+    openCodePanel(id);
   });
 
   document.addEventListener('click',e=>{
