@@ -5,7 +5,7 @@ import (
 	sitter "github.com/tree-sitter/go-tree-sitter"
 	tree_sitter_rust "github.com/tree-sitter/tree-sitter-rust/bindings/go"
 
-	"github.com/notrobot1/funcscan/lang"
+	"github.com/notrobot1/funcscan/relationships/lang"
 )
 
 // Spec returns the Rust language description.
