@@ -398,6 +398,43 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); color: var(-
 }
 .sv-tab-close:hover { opacity: 1; }
 
+/* ── Edge context menu ───────────────────────────────────────────────────── */
+#edge-ctx-menu {
+  position: fixed;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgba(0,0,0,.5);
+  z-index: 400;
+  min-width: 200px;
+  overflow: hidden;
+  display: none;
+}
+.ctx-title {
+  padding: 6px 12px;
+  font-size: 11px;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border);
+  font-family: var(--font-mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ctx-btn {
+  display: block;
+  width: 100%;
+  padding: 9px 14px;
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+  font-size: 13px;
+}
+.ctx-btn:last-child { border-bottom: none; }
+.ctx-btn:hover { background: var(--surface2); }
+
 /* ── Save popup ──────────────────────────────────────────────────────────── */
 #save-popup {
   position: fixed;

@@ -330,12 +330,11 @@ document.addEventListener('DOMContentLoaded', async () => {
 
       if (hoveredNode && hoveredSubtree) {
         if (hoveredSubtree.edges.has(edge)) {
-          // Callee edges (outgoing from selected): blue
-          // Caller edges (incoming to selected): orange
           const isCaller = graph.target(edge) === hoveredNode;
-          r.color  = isCaller ? '#ffa657' : '#58a6ff';
-          r.size   = Math.max(0.2, 1.2 * scale);
-          r.zIndex = 9999;
+          r.color  = edge === hoveredEdge ? '#ffffff'
+                   : isCaller ? '#ffa657' : '#58a6ff';
+          r.size   = Math.max(0.2, (edge === hoveredEdge ? 2.5 : 1.8) * scale);
+          r.zIndex = edge === hoveredEdge ? 99999 : 9999;
         } else {
           r.hidden = true;
         }
@@ -399,17 +398,102 @@ document.addEventListener('DOMContentLoaded', async () => {
     tooltip.classList.remove('visible'); stHover.textContent='';
   });
 
-  renderer.on('moveBody',({event})=>{
-    if(tooltip.classList.contains('visible')) moveTooltip(event);
+  // ── Edge hover / click / right-click ─────────────────────────────────
+  let hoveredEdge  = null;   // edge id currently under cursor (from highlighted set)
+  let ctxEdge      = null;   // edge id for context menu
+  const HIT_GRAPH  = 18;     // graph-space hit radius
+
+  const ctxMenu = document.getElementById('edge-ctx-menu');
+
+  // Find the highlighted edge nearest to a graph-space point.
+  function nearestHighlightedEdge(gx, gy) {
+    if (!hoveredSubtree || !hoveredSubtree.edges.size) return null;
+    let best = null, bestDist = Infinity;
+    for (const eid of hoveredSubtree.edges) {
+      const a = graph.getNodeAttributes(graph.source(eid));
+      const b = graph.getNodeAttributes(graph.target(eid));
+      const d = pointToSegmentDist(gx, gy, a.x, a.y, b.x, b.y);
+      if (d < HIT_GRAPH && d < bestDist) { bestDist = d; best = eid; }
+    }
+    return best;
+  }
+
+  // Navigate camera to a node using getNodeDisplayData (correct normalized coords).
+  function navigateToNode(nodeId) {
+    if (!graph.hasNode(nodeId)) return;
+    const display = renderer.getNodeDisplayData(nodeId);
+    if (!display) return;
+    renderer.getCamera().animate(
+      { x: display.x, y: display.y, ratio: renderer.getCamera().getState().ratio },
+      { duration: 400 }
+    );
+  }
+
+  // Check if a node is currently within the visible viewport.
+  function isNodeOnScreen(nodeId) {
+    try {
+      const screen = renderer.graphToViewport({
+        x: graph.getNodeAttribute(nodeId, 'x'),
+        y: graph.getNodeAttribute(nodeId, 'y'),
+      });
+      return screen.x >= 0 && screen.x <= sigmaEl.clientWidth &&
+             screen.y >= 0 && screen.y <= sigmaEl.clientHeight;
+    } catch(_) { return false; }
+  }
+
+  // Context menu actions.
+  ctxMenu.addEventListener('click', e => {
+    const btn = e.target.closest('[data-nav]');
+    if (!btn || !ctxEdge) return;
+    const nodeId = btn.dataset.nav === 'target'
+      ? graph.target(ctxEdge)
+      : graph.source(ctxEdge);
+    navigateToNode(nodeId);
+    ctxMenu.style.display = 'none';
+  });
+  document.addEventListener('click', () => { ctxMenu.style.display = 'none'; });
+
+  // Edge hover via native mousemove (more reliable than sigma's moveBody).
+  sigmaEl.addEventListener('mousemove', e => {
+    // Update tooltip position.
+    if (tooltip.classList.contains('visible')) {
+      tooltip.style.left = Math.min(e.offsetX+14, window.innerWidth -290)+'px';
+      tooltip.style.top  = Math.min(e.offsetY+14, window.innerHeight-90 )+'px';
+    }
+
+    if (!hoveredSubtree || !hoveredSubtree.edges.size) {
+      if (hoveredEdge) { hoveredEdge = null; sigmaEl.style.cursor=''; renderer.refresh(); }
+      return;
+    }
+    try {
+      const g = renderer.viewportToGraph({ x: e.offsetX, y: e.offsetY });
+      const found = nearestHighlightedEdge(g.x, g.y);
+      if (found !== hoveredEdge) {
+        hoveredEdge = found;
+        sigmaEl.style.cursor = found ? 'pointer' : '';
+        renderer.refresh();
+      }
+    } catch(_) {}
+  });
+
+  // Right-click on highlighted edge → navigate to SOURCE (caller).
+  sigmaEl.addEventListener('contextmenu', e => {
+    e.preventDefault();
+    if (!hoveredEdge) return;
+    navigateToNode(graph.source(hoveredEdge));
   });
 
   function moveTooltip(e){
     tooltip.style.left=Math.min(e.x+14,window.innerWidth -290)+'px';
     tooltip.style.top =Math.min(e.y+14,window.innerHeight-90 )+'px';
   }
+  renderer.on('moveBody', ({ event }) => {
+    if (tooltip.classList.contains('visible')) moveTooltip(event);
+  });
 
   // 5. Click ────────────────────────────────────────────────────────────
   renderer.on('clickNode',({node})=>{
+    if (didDrag) return;
     selectedNode=node;
     hoveredNode=node;
     hoveredSubtree=computeSubtree(node);
@@ -418,7 +502,18 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
   renderer.on('clickStage',()=>{
+    // If clicking near a highlighted edge → navigate to its target
+    // (unless target is already on screen).
+    if (hoveredEdge) {
+      const tgt = graph.target(hoveredEdge);
+      if (!isNodeOnScreen(tgt)) {
+        navigateToNode(tgt);
+      }
+      return; // don't clear selection
+    }
+
     selectedNode=null; hoveredNode=null; hoveredSubtree=null;
+    hoveredEdge=null;
     renderer.refresh();
   });
 
@@ -532,9 +627,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   function selectSavedNode(id) {
     if (!graph.hasNode(id)) return;
-    // Only set selectedNode — don't set hoveredNode/hoveredSubtree so the
-    // rest of the graph stays fully visible (no dimming).
-    selectedNode = id;
+    selectedNode   = id;
+    hoveredNode    = id;
+    hoveredSubtree = computeSubtree(id);
     renderer.refresh();
     renderSavedUI();
 
@@ -780,21 +875,26 @@ document.addEventListener('DOMContentLoaded', async () => {
   let dragLastPos = null;
 
   // Capture phase — runs BEFORE Sigma's own mousedown handler.
-  // If the click is on the selected node, block Sigma from starting a camera pan.
+  // Allow dragging any node in the current highlighted subtree.
   sigmaEl.addEventListener('mousedown', e => {
-    if (!selectedNode) return;
-    try {
-      const screen = renderer.graphToViewport({
-        x: graph.getNodeAttribute(selectedNode, 'x'),
-        y: graph.getNodeAttribute(selectedNode, 'y'),
-      });
-      const dist = Math.hypot(e.offsetX - screen.x, e.offsetY - screen.y);
-      const size = graph.getNodeAttribute(selectedNode, 'size') || 8;
-      if (dist > size * 3 + 10) return;
-    } catch(_) { return; }
+    if (!hoveredSubtree) return;
+    // Find the closest subtree node under the cursor.
+    let closest = null, closestDist = Infinity;
+    for (const id of hoveredSubtree.nodes) {
+      try {
+        const screen = renderer.graphToViewport({
+          x: graph.getNodeAttribute(id, 'x'),
+          y: graph.getNodeAttribute(id, 'y'),
+        });
+        const size = (graph.getNodeAttribute(id, 'size') || 6) * 3 + 10;
+        const dist = Math.hypot(e.offsetX - screen.x, e.offsetY - screen.y);
+        if (dist < size && dist < closestDist) { closestDist = dist; closest = id; }
+      } catch(_) {}
+    }
+    if (!closest) return;
 
-    e.stopImmediatePropagation(); // prevents Sigma from registering camera drag
-    dragNode    = selectedNode;
+    e.stopImmediatePropagation();
+    dragNode    = closest;
     dragLastPos = { x: e.offsetX, y: e.offsetY };
     document.body.style.cursor = 'grabbing';
   }, true /* capture */);
@@ -820,10 +920,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     dragLastPos = cur;
   });
 
+  let didDrag = false;
   document.addEventListener('mouseup', () => {
     if (!dragNode) return;
+    didDrag = dragNode !== null;
     dragNode = null; dragLastPos = null;
     document.body.style.cursor = '';
+    // Clear flag after Sigma's click event has fired.
+    setTimeout(() => { didDrag = false; }, 100);
   });
 
   // 9. Panel resize ─────────────────────────────────────────────────────
