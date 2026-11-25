@@ -333,7 +333,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           const isCaller = graph.target(edge) === hoveredNode;
           r.color  = edge === hoveredEdge ? '#ffffff'
                    : isCaller ? '#ffa657' : '#58a6ff';
-          r.size   = Math.max(0.2, (edge === hoveredEdge ? 2.5 : 1.8) * scale);
+          r.size   = Math.max(0.2, (edge === hoveredEdge ? 2.5 : 3.6) * scale);
           r.zIndex = edge === hoveredEdge ? 99999 : 9999;
         } else {
           r.hidden = true;
@@ -471,6 +471,16 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (found !== hoveredEdge) {
         hoveredEdge = found;
         sigmaEl.style.cursor = found ? 'pointer' : '';
+        if (found) {
+          const srcName = graph.getNodeAttribute(graph.source(found), 'label');
+          const tgtName = graph.getNodeAttribute(graph.target(found), 'label');
+          ttName.textContent  = `${srcName} → ${tgtName}`;
+          ttFile.textContent  = '';
+          ttStats.textContent = 'click → go to callee  •  right-click → go to caller';
+          tooltip.classList.add('visible');
+        } else {
+          tooltip.classList.remove('visible');
+        }
         renderer.refresh();
       }
     } catch(_) {}
@@ -765,6 +775,71 @@ document.addEventListener('DOMContentLoaded', async () => {
     setSavedMode(!savedMode);
   });
 
+  // ── Code → graph edge highlight ───────────────────────────────────────
+  // Code panel → graph: hover highlights edge, click navigates to node.
+  const nodeByLabel = new Map();
+  graph.forEachNode((id, a) => { if (!nodeByLabel.has(a.label)) nodeByLabel.set(a.label, id); });
+
+  let codeHoveredNode = null;
+
+  function wordAtCaret(clientX, clientY) {
+    let textNode = null, offset = 0;
+    if (document.caretPositionFromPoint) {
+      const p = document.caretPositionFromPoint(clientX, clientY);
+      if (p && p.offsetNode.nodeType === Node.TEXT_NODE) { textNode = p.offsetNode; offset = p.offset; }
+    } else if (document.caretRangeFromPoint) {
+      const r = document.caretRangeFromPoint(clientX, clientY);
+      if (r && r.startContainer.nodeType === Node.TEXT_NODE) { textNode = r.startContainer; offset = r.startOffset; }
+    }
+    if (!textNode) return '';
+    const t = textNode.textContent;
+    let s = offset, end = offset;
+    while (s > 0 && /[\w$]/.test(t[s-1])) s--;
+    while (end < t.length && /[\w$]/.test(t[end])) end++;
+    return t.slice(s, end);
+  }
+
+  codeScroll.addEventListener('mousemove', e => {
+    const word = wordAtCaret(e.clientX, e.clientY);
+
+    // Highlight matching edge.
+    if (hoveredSubtree && hoveredSubtree.edges.size && word) {
+      let found = null;
+      for (const eid of hoveredSubtree.edges) {
+        if (graph.getNodeAttribute(graph.target(eid), 'label') === word ||
+            graph.getNodeAttribute(graph.source(eid), 'label') === word) {
+          found = eid; break;
+        }
+      }
+      if (found !== hoveredEdge) { hoveredEdge = found; renderer.refresh(); }
+    } else if (hoveredEdge) {
+      hoveredEdge = null; renderer.refresh();
+    }
+
+    // Pointer cursor when hovering a known function name.
+    const nodeId = word ? nodeByLabel.get(word) : null;
+    if (nodeId !== codeHoveredNode) {
+      codeHoveredNode = nodeId || null;
+      codeScroll.style.cursor = nodeId ? 'pointer' : '';
+    }
+  });
+
+  codeScroll.addEventListener('mouseleave', () => {
+    if (hoveredEdge) { hoveredEdge = null; renderer.refresh(); }
+    codeHoveredNode = null; codeScroll.style.cursor = '';
+  });
+
+  codeScroll.addEventListener('click', e => {
+    if (!codeHoveredNode || !graph.hasNode(codeHoveredNode)) return;
+    const display = renderer.getNodeDisplayData(codeHoveredNode);
+    if (!display) return;
+    renderer.getCamera().animate(
+      { x: display.x, y: display.y, ratio: renderer.getCamera().getState().ratio },
+      { duration: 400 }
+    );
+    e.stopPropagation();
+  });
+
   // 7. Code panel ───────────────────────────────────────────────────────
   document.getElementById('panel-close').addEventListener('click',()=>{
     codePanel.classList.remove('open');
@@ -874,11 +949,15 @@ document.addEventListener('DOMContentLoaded', async () => {
   let dragNode    = null;
   let dragLastPos = null;
 
-  // Capture phase — runs BEFORE Sigma's own mousedown handler.
-  // Allow dragging any node in the current highlighted subtree.
+  // Capture phase: find which subtree node is under the cursor on mousedown.
+  // We DON'T stopImmediatePropagation yet — only do so once real mouse movement
+  // is detected, so clicks still fire normally.
+  let pendingDragNode = null;
+  let pendingDragPos  = null;
+
   sigmaEl.addEventListener('mousedown', e => {
+    pendingDragNode = null;
     if (!hoveredSubtree) return;
-    // Find the closest subtree node under the cursor.
     let closest = null, closestDist = Infinity;
     for (const id of hoveredSubtree.nodes) {
       try {
@@ -891,15 +970,29 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (dist < size && dist < closestDist) { closestDist = dist; closest = id; }
       } catch(_) {}
     }
-    if (!closest) return;
-
-    e.stopImmediatePropagation();
-    dragNode    = closest;
-    dragLastPos = { x: e.offsetX, y: e.offsetY };
-    document.body.style.cursor = 'grabbing';
+    if (closest) {
+      pendingDragNode = closest;
+      pendingDragPos  = { x: e.offsetX, y: e.offsetY };
+    }
   }, true /* capture */);
 
+  // Block Sigma's camera pan during node drag (capture fires before Sigma's bubble).
+  sigmaEl.addEventListener('mousemove', e => {
+    if (dragNode) e.stopImmediatePropagation();
+  }, true);
+
   document.addEventListener('mousemove', e => {
+    // Promote pending drag to real drag once mouse actually moves.
+    if (!dragNode && pendingDragNode) {
+      const rect = sigmaEl.getBoundingClientRect();
+      const cx = e.clientX - rect.left, cy = e.clientY - rect.top;
+      if (Math.hypot(cx - pendingDragPos.x, cy - pendingDragPos.y) > 4) {
+        dragNode    = pendingDragNode;
+        dragLastPos = pendingDragPos;
+        pendingDragNode = null;
+        document.body.style.cursor = 'grabbing';
+      }
+    }
     if (!dragNode || !dragLastPos) return;
     const rect = sigmaEl.getBoundingClientRect();
     const cur  = { x: e.clientX - rect.left, y: e.clientY - rect.top };
@@ -918,10 +1011,11 @@ document.addEventListener('DOMContentLoaded', async () => {
       renderer.refresh();
     } catch(_) {}
     dragLastPos = cur;
-  });
+  }, true); // capture phase — fires before sigmaEl capture that stops Sigma's pan
 
   let didDrag = false;
   document.addEventListener('mouseup', () => {
+    pendingDragNode = null; pendingDragPos = null;
     if (!dragNode) return;
     didDrag = dragNode !== null;
     dragNode = null; dragLastPos = null;
