@@ -29,6 +29,9 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 
 	// Lazy function analysis (entry-point detection, etc.)
 	mux.HandleFunc("/api/analyze/", s.handleAnalyze)
+
+	// Terminal (SSE-streamed shell execution in RootDir)
+	mux.HandleFunc("/api/terminal/run", s.handleTerminalRun)
 }
 
 // handleGraph returns all nodes, edges, and pre-computed layout positions.

@@ -1117,6 +1117,140 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 
+  // ── Terminal ──────────────────────────────────────────────────────────
+  const termPanel   = document.getElementById('terminal-panel');
+  const termOutput  = document.getElementById('terminal-output');
+  const termInput   = document.getElementById('terminal-input');
+  const termHandle  = document.getElementById('terminal-resize-handle');
+  const appEl       = document.getElementById('app');
+  const btnTerminal = document.getElementById('btn-terminal');
+
+  // ansi_up instance for colour rendering.
+  const ansiUp = new AnsiUp();
+  ansiUp.use_classes = false;
+
+  let termHistory   = [];   // command history
+  let termHistIdx   = -1;   // current position in history (-1 = new input)
+  let termRunning   = false;
+  let termAbortCtrl = null;
+
+  function termPrint(html, cls = '') {
+    const div = document.createElement('div');
+    div.className = 'terminal-line' + (cls ? ' ' + cls : '');
+    div.innerHTML = html;
+    termOutput.appendChild(div);
+    termOutput.scrollTop = termOutput.scrollHeight;
+  }
+
+  async function termRun(cmd) {
+    if (termRunning) return;
+    termRunning   = true;
+    termAbortCtrl = new AbortController();
+    termHistIdx   = -1;
+
+    termPrint(esc('$ ' + cmd), 'terminal-cmd');
+
+    try {
+      const res = await fetch('/api/terminal/run', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ cmd }),
+        signal:  termAbortCtrl.signal,
+      });
+      if (!res.ok) { termPrint('error: ' + res.status, 'terminal-err'); return; }
+
+      const reader  = res.body.getReader();
+      const decoder = new TextDecoder();
+      let   buf     = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+
+        // SSE lines are "data: {...}\n\n"
+        let idx;
+        while ((idx = buf.indexOf('\n\n')) >= 0) {
+          const line = buf.slice(0, idx).replace(/^data: /, '');
+          buf = buf.slice(idx + 2);
+          try {
+            const ev = JSON.parse(line);
+            if (ev.type === 'output') {
+              termPrint(ansiUp.ansi_to_html(ev.text));
+            } else if (ev.type === 'exit') {
+              const cls = ev.code === 0 ? 'terminal-exit-ok' : 'terminal-exit-err';
+              termPrint(`[exited ${ev.code}]`, cls);
+            }
+          } catch(_) {}
+        }
+      }
+    } catch (e) {
+      if (e.name !== 'AbortError') termPrint('error: ' + e.message, 'terminal-err');
+    } finally {
+      termRunning   = false;
+      termAbortCtrl = null;
+      termInput.focus();
+    }
+  }
+
+  termInput.addEventListener('keydown', e => {
+    if (e.key === 'Enter') {
+      const cmd = termInput.value.trim();
+      termInput.value = '';
+      if (!cmd) return;
+      termHistory.unshift(cmd);
+      if (termHistory.length > 200) termHistory.pop();
+      termHistIdx = -1;
+      termRun(cmd);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (termHistIdx < termHistory.length - 1) {
+        termHistIdx++;
+        termInput.value = termHistory[termHistIdx];
+        setTimeout(() => termInput.setSelectionRange(9999,9999), 0);
+      }
+    } else if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      if (termHistIdx > 0) {
+        termHistIdx--;
+        termInput.value = termHistory[termHistIdx];
+      } else {
+        termHistIdx = -1;
+        termInput.value = '';
+      }
+    } else if (e.key === 'c' && e.ctrlKey) {
+      if (termAbortCtrl) { termAbortCtrl.abort(); termPrint('^C', 'terminal-err'); }
+    }
+  });
+
+  // Toggle panel.
+  btnTerminal.addEventListener('click', () => {
+    const open = appEl.classList.toggle('terminal-open');
+    btnTerminal.classList.toggle('active', open);
+    if (open) termInput.focus();
+  });
+
+  // Resize by dragging the handle.
+  let termResizing = false, termStartY = 0, termStartH = 0;
+  termHandle.addEventListener('mousedown', e => {
+    e.preventDefault(); // prevent text selection from starting
+    termResizing = true; termStartY = e.clientY;
+    termStartH = termPanel.offsetHeight;
+    document.documentElement.style.cursor     = 'ns-resize';
+    document.documentElement.style.userSelect = 'none';
+  });
+  document.addEventListener('mousemove', e => {
+    if (!termResizing) return;
+    const newH = Math.max(80, Math.min(window.innerHeight * 0.7, termStartH + (termStartY - e.clientY)));
+    document.documentElement.style.setProperty('--term-h', newH + 'px');
+  });
+  document.addEventListener('mouseup', () => {
+    if (!termResizing) return;
+    termResizing = false;
+    document.documentElement.style.cursor     = '';
+    document.documentElement.style.userSelect = '';
+  });
+
   }catch(e){
     loadingText.textContent='Init error: '+e.message;
     console.error(e);
