@@ -280,6 +280,8 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); color: var(-
 }
 .btn:hover { background: var(--border); }
 .btn.active { background: var(--accent); border-color: var(--accent); color: #000; }
+.btn:disabled { opacity: 0.35; cursor: default; }
+.btn:disabled:hover { background: var(--surface2); }
 
 .ml-auto { margin-left: auto; }
 

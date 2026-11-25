@@ -350,6 +350,63 @@ document.addEventListener('DOMContentLoaded', async () => {
     stZoom.textContent = `zoom: ${(1/s.ratio).toFixed(2)}`;
   });
 
+  // ── Navigation history ────────────────────────────────────────────────
+  const HISTORY_MAX = 50;
+  const navHistory  = [];   // array of nodeIds
+  let   navPos      = -1;   // current position in navHistory
+  let   navSkip     = false; // prevent push when navigating back/forward
+
+  const btnBack    = document.getElementById('btn-back');
+  const btnForward = document.getElementById('btn-forward');
+
+  function updateNavButtons() {
+    btnBack.disabled    = navPos <= 0;
+    btnForward.disabled = navPos >= navHistory.length - 1;
+  }
+
+  function navPush(nodeId) {
+    if (navSkip) return;
+    // Truncate forward history.
+    navHistory.splice(navPos + 1);
+    navHistory.push(nodeId);
+    if (navHistory.length > HISTORY_MAX) navHistory.shift();
+    navPos = navHistory.length - 1;
+    updateNavButtons();
+  }
+
+  function navGo(nodeId) {
+    if (!graph.hasNode(nodeId)) return;
+    navSkip = true;
+    selectedNode   = nodeId;
+    hoveredNode    = nodeId;
+    hoveredSubtree = computeSubtree(nodeId);
+    renderer.refresh();
+    openCodePanel(nodeId);
+    if (!isNodeOnScreen(nodeId)) {
+      const display = renderer.getNodeDisplayData(nodeId);
+      if (display) {
+        renderer.getCamera().animate(
+          { x: display.x, y: display.y, ratio: renderer.getCamera().getState().ratio },
+          { duration: 500 }
+        );
+      }
+    }
+    navSkip = false;
+    updateNavButtons();
+  }
+
+  btnBack.addEventListener('click', () => {
+    if (navPos <= 0) return;
+    navPos--;
+    navGo(navHistory[navPos]);
+  });
+
+  btnForward.addEventListener('click', () => {
+    if (navPos >= navHistory.length - 1) return;
+    navPos++;
+    navGo(navHistory[navPos]);
+  });
+
   // 3. Physics + initial layout ─────────────────────────────────────────
   loadingText.textContent = 'Computing layout…';
   buildPhysics();
@@ -509,6 +566,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     hoveredSubtree=computeSubtree(node);
     renderer.refresh();
     openCodePanel(node);
+    navPush(node);
   });
 
   renderer.on('clickStage',()=>{
@@ -642,6 +700,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     hoveredSubtree = computeSubtree(id);
     renderer.refresh();
     renderSavedUI();
+    navPush(id);
 
     try {
       // getNodeDisplayData returns coordinates in Sigma's internal normalized space —
@@ -831,12 +890,20 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   codeScroll.addEventListener('click', e => {
     if (!codeHoveredNode || !graph.hasNode(codeHoveredNode)) return;
-    const display = renderer.getNodeDisplayData(codeHoveredNode);
-    if (!display) return;
-    renderer.getCamera().animate(
-      { x: display.x, y: display.y, ratio: renderer.getCamera().getState().ratio },
-      { duration: 400 }
-    );
+    const id = codeHoveredNode;
+    selectedNode   = id;
+    hoveredNode    = id;
+    hoveredSubtree = computeSubtree(id);
+    renderer.refresh();
+    openCodePanel(id);
+    navPush(id);
+    if (!isNodeOnScreen(id)) {
+      const display = renderer.getNodeDisplayData(id);
+      if (display) renderer.getCamera().animate(
+        { x: display.x, y: display.y, ratio: renderer.getCamera().getState().ratio },
+        { duration: 400 }
+      );
+    }
     e.stopPropagation();
   });
 
@@ -934,6 +1001,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     selectedNode=id; hoveredNode=id; hoveredSubtree=computeSubtree(id);
     renderer.refresh();
     openCodePanel(id);
+    navPush(id);
+    if(!isNodeOnScreen(id)){
+      const display=renderer.getNodeDisplayData(id);
+      if(display) renderer.getCamera().animate(
+        {x:display.x,y:display.y,ratio:renderer.getCamera().getState().ratio},
+        {duration:500}
+      );
+    }
   });
 
   document.addEventListener('click',e=>{
